@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --font-hud: "Rajdhani", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --font-sans: "Inter", sans-serif;
+
+  --color-stark-bg: #050811;
+  --color-stark-surface: rgba(10, 16, 29, 0.75);
+  --color-stark-card: rgba(14, 23, 38, 0.85);
+  --color-arc-cyan: #00F0FF;
+  --color-arc-glow: rgba(0, 240, 255, 0.35);
+  --color-stark-gold: #FFB800;
+  --color-stark-crimson: #FF2A5F;
+
+  --shadow-glow-cyan: 0 0 15px rgba(0, 240, 255, 0.25), inset 0 0 15px rgba(0, 240, 255, 0.05);
+  --shadow-glow-gold: 0 0 15px rgba(255, 184, 0, 0.25);
+  --shadow-glow-crimson: 0 0 15px rgba(255, 42, 95, 0.3);
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-stark-bg);
+  color: white;
+}
+
+/* Custom Scrollbar for Textareas and Overflows */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(10, 16, 29, 0.75);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 240, 255, 0.3);
+  border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 240, 255, 0.5);
+}

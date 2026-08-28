@@ -1,0 +1,9 @@
+{
+  "appId": "com.veil.app",
+  "appName": "Veil",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  }
+}

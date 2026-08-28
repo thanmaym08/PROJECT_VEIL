@@ -1,4 +1,4 @@
-package com.veil.app;
+package com.projectveil.quantum;
 
 import com.getcapacitor.BridgeActivity;
 

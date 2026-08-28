@@ -49,13 +49,38 @@ export default function ChatLayout({ keys, myId }) {
       : 'ws://localhost:8080';
       
     ws.current = new WebSocket(wsUrl);
-    ws.current.onopen = () => {
+    ws.current.onopen = async () => {
       setWsStatus('connected');
+
+      let fcmToken = null;
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const { PushNotifications } = await import('@capacitor/push-notifications');
+          let permStatus = await PushNotifications.checkPermissions();
+          if (permStatus.receive === 'prompt') {
+            permStatus = await PushNotifications.requestPermissions();
+          }
+          if (permStatus.receive === 'granted') {
+            await PushNotifications.register();
+            fcmToken = await new Promise((resolve) => {
+              PushNotifications.addListener('registration', (token) => resolve(token.value));
+              PushNotifications.addListener('registrationError', () => resolve(null));
+              setTimeout(() => resolve(null), 3000);
+            });
+            // Remove listeners so they don't stack on reconnect
+            await PushNotifications.removeAllListeners();
+          }
+        } catch (e) {
+          console.error("Push Error", e);
+        }
+      }
+
       ws.current.send(JSON.stringify({
         type: 'register',
         cipherId: myId,
         mlkemPub: keys.mlkem.publicKeyB64,
-        x25519Pub: keys.x25519.publicKeyB64
+        x25519Pub: keys.x25519.publicKeyB64,
+        fcmToken
       }));
     };
     ws.current.onclose = () => {

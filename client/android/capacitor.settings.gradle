@@ -4,3 +4,6 @@ project(':capacitor-android').projectDir = new File('../node_modules/@capacitor/
 
 include ':capacitor-community-privacy-screen'
 project(':capacitor-community-privacy-screen').projectDir = new File('../node_modules/@capacitor-community/privacy-screen/android')
+
+include ':capacitor-push-notifications'
+project(':capacitor-push-notifications').projectDir = new File('../node_modules/@capacitor/push-notifications/android')

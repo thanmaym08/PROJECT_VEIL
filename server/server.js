@@ -7,6 +7,21 @@ const MAX_QUEUE_SIZE = 50;
 const MESSAGE_TTL = 86400000; // 24 hours (increased from 1 hr)
 const IDENTITY_TTL = 259200000; // 72 hours
 
+import admin from 'firebase-admin';
+import { readFileSync } from 'fs';
+
+let firebaseEnabled = false;
+try {
+  const serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  firebaseEnabled = true;
+  console.log("Firebase Admin initialized for Zero-Knowledge Push");
+} catch(e) {
+  console.warn("Firebase Admin failed to init, skipping push capabilities");
+}
+
 const wss = new WebSocketServer({ 
   port: 8080,
   maxPayload: MAX_PAYLOAD_SIZE,
@@ -59,7 +74,7 @@ wss.on('connection', (ws, req) => {
 
     switch (data.type) {
       case 'register': {
-        const { cipherId, mlkemPub, x25519Pub } = data;
+        const { cipherId, mlkemPub, x25519Pub, fcmToken } = data;
         if (!cipherId || !mlkemPub || !x25519Pub) return;
 
         // Register identity
@@ -67,6 +82,7 @@ wss.on('connection', (ws, req) => {
           mlkemPub,
           x25519Pub,
           ws,
+          fcmToken,
           lastSeen: Date.now()
         });
         
@@ -136,6 +152,19 @@ wss.on('connection', (ws, req) => {
           
           if (ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({ type: 'ack', to, seq, status: 'queued' }));
+          }
+
+          // Trigger Zero-Knowledge Push Notification
+          if (target && target.fcmToken && firebaseEnabled) {
+            admin.messaging().send({
+              token: target.fcmToken,
+              notification: {
+                title: "PROJECT VEIL",
+                body: "Incoming Encrypted Transmission"
+              },
+              data: { wakeup: "true" },
+              android: { priority: "high" }
+            }).catch(e => console.error("FCM Error:", e.message));
           }
         }
         break;

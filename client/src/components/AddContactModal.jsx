@@ -2,11 +2,13 @@ import { useState, useEffect } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { QRCodeSVG } from 'qrcode.react';
 import { X } from 'lucide-react';
+import { Clipboard } from '@capacitor/clipboard';
 
 export default function AddContactModal({ myId, keys, onClose, onAdd }) {
   const [tab, setTab] = useState('scan');
   const [scannedData, setScannedData] = useState('');
   const [name, setName] = useState('');
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let scanner = null;
@@ -54,6 +56,22 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     }
   };
 
+  const handleCopy = async () => {
+    try {
+      await Clipboard.write({ string: myData });
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("Clipboard write failed", e);
+      // Fallback for older browsers
+      try {
+        navigator.clipboard.writeText(myData);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {}
+    }
+  };
+
   const myData = JSON.stringify({
     id: myId,
     nickname: keys.nickname,
@@ -89,10 +107,10 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
               <div className="w-full relative group">
                 <textarea readOnly value={myData} className="w-full h-20 bg-stark-bg border border-arc-cyan/30 p-2 text-[8px] font-mono text-arc-cyan/50 custom-scrollbar resize-none focus:outline-none" />
                 <button 
-                  onClick={() => navigator.clipboard.writeText(myData)} 
-                  className="absolute bottom-2 right-2 bg-arc-cyan/20 hover:bg-arc-cyan border border-arc-cyan text-arc-cyan hover:text-stark-bg px-3 py-1 text-xs font-hud tracking-widest transition-all shadow-glow-cyan"
+                  onClick={handleCopy} 
+                  className={`absolute bottom-2 right-2 px-3 py-1 text-xs font-hud tracking-widest transition-all shadow-glow-cyan ${copied ? 'bg-arc-cyan text-stark-bg' : 'bg-arc-cyan/20 hover:bg-arc-cyan border border-arc-cyan text-arc-cyan hover:text-stark-bg'}`}
                 >
-                  COPY JSON
+                  {copied ? 'COPIED!' : 'COPY JSON'}
                 </button>
               </div>
             </div>

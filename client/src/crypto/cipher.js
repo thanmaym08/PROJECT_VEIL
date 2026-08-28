@@ -44,7 +44,20 @@ export async function encryptMessage(sessionKeyBytes, plaintextStr, fromCipherId
   );
 
   const aad = buildAAD(1, fromCipherId, toCipherId, BigInt(seq), BigInt(ts));
-  const encodedPlaintext = utf8ToBytes(plaintextStr);
+  const rawPlaintext = utf8ToBytes(plaintextStr);
+  
+  // TRAFFIC ANALYSIS PADDING: Pad to next 512-byte boundary
+  const targetSize = Math.ceil((rawPlaintext.length + 1) / 512) * 512;
+  const paddedPlaintext = new Uint8Array(targetSize);
+  
+  // Fill with random noise first (to obscure padding length if ever exposed)
+  crypto.getRandomValues(paddedPlaintext);
+  
+  // Insert original message
+  paddedPlaintext.set(rawPlaintext, 0);
+  
+  // Insert NULL byte terminator
+  paddedPlaintext[rawPlaintext.length] = 0;
 
   const ciphertextBuf = await crypto.subtle.encrypt(
     {
@@ -87,7 +100,12 @@ export async function decryptMessage(sessionKeyBytes, ivB64, ciphertextB64, from
       ciphertext
     );
     
-    return new TextDecoder().decode(plaintextBuf);
+    // Strip Padding (find first NULL byte)
+    const paddedArray = new Uint8Array(plaintextBuf);
+    const nullIdx = paddedArray.indexOf(0);
+    const unpaddedArray = nullIdx !== -1 ? paddedArray.slice(0, nullIdx) : paddedArray;
+    
+    return new TextDecoder().decode(unpaddedArray);
   } catch (err) {
     throw new Error("Decryption failed: Integrity or AAD mismatch.");
   }

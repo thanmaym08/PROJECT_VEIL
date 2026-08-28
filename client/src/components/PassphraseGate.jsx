@@ -8,6 +8,13 @@ export default function PassphraseGate({ onUnlock, onReset }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
+    // DURESS PIN (TACTICAL WIPE)
+    if (passphrase === '0000') {
+      onReset();
+      return;
+    }
+
     try {
       const keys = await unwrapKeys(passphrase);
       onUnlock(keys);
@@ -45,6 +52,10 @@ export default function PassphraseGate({ onUnlock, onReset }) {
           INITIALIZE
         </button>
       </form>
+
+      <div className="mt-4 text-[9px] font-mono text-stark-crimson/50 opacity-0 hover:opacity-100 transition-opacity cursor-default tracking-widest">
+        [DURESS OVERRIDE PIN: 0000]
+      </div>
 
       <button onClick={onReset} className="mt-12 font-hud tracking-[0.1em] text-sm text-gray-500 hover:text-stark-crimson hover:shadow-glow-crimson transition-all duration-200">
         PURGE KEYSTORE (FACTORY RESET)

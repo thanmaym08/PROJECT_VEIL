@@ -144,43 +144,48 @@ export default function ChatLayout({ keys, myId }) {
     e.preventDefault();
     if (!inputText.trim() || !activeContact) return;
 
-    let sessionKey = sessionKeys.current[activeContact.id];
-    let ekpub = undefined, kemct = undefined;
+    try {
+      let sessionKey = sessionKeys.current[activeContact.id];
+      let ekpub = undefined, kemct = undefined;
 
-    if (!sessionKey) {
-      const sess = computeInitiatorSession(
-        activeContact.mlkemPub, activeContact.x25519Pub,
-        myId, activeContact.id
-      );
-      sessionKey = sess.sessionKey;
-      sessionKeys.current[activeContact.id] = sessionKey;
-      ekpub = sess.ephemeralX25519PubB64;
-      kemct = sess.kemCiphertextB64;
+      if (!sessionKey) {
+        const sess = computeInitiatorSession(
+          activeContact.mlkemPub, activeContact.x25519Pub,
+          myId, activeContact.id
+        );
+        sessionKey = sess.sessionKey;
+        sessionKeys.current[activeContact.id] = sessionKey;
+        ekpub = sess.ephemeralX25519PubB64;
+        kemct = sess.kemCiphertextB64;
+      }
+
+      const seq = Date.now(); // simple seq generator
+      const ts = Date.now();
+      
+      // Pad to 8KB (optional, skipping for simple UI)
+      const { ivB64, ciphertextB64 } = await encryptMessage(sessionKey, inputText, myId, activeContact.id, seq, ts);
+
+      const envelope = {
+        v: 1, type: 'msg',
+        from: myId, to: activeContact.id,
+        seq, ts, iv: ivB64, ct: ciphertextB64
+      };
+      
+      if (ekpub && kemct) {
+        envelope.ekpub = ekpub;
+        envelope.kemct = kemct;
+      }
+
+      ws.current.send(JSON.stringify(envelope));
+      
+      const msgObj = { contactId: activeContact.id, fromMe: true, text: inputText, ts, seq, status: 'sending' };
+      await saveMessage(msgObj);
+      setMessages(prev => [...prev, msgObj]);
+      setInputText('');
+    } catch (err) {
+      alert("Encryption or Socket Error: " + err.message);
+      console.error(err);
     }
-
-    const seq = Date.now(); // simple seq generator
-    const ts = Date.now();
-    
-    // Pad to 8KB (optional, skipping for simple UI)
-    const { ivB64, ciphertextB64 } = await encryptMessage(sessionKey, inputText, myId, activeContact.id, seq, ts);
-
-    const envelope = {
-      v: 1, type: 'msg',
-      from: myId, to: activeContact.id,
-      seq, ts, iv: ivB64, ct: ciphertextB64
-    };
-    
-    if (ekpub && kemct) {
-      envelope.ekpub = ekpub;
-      envelope.kemct = kemct;
-    }
-
-    ws.current.send(JSON.stringify(envelope));
-    
-    const msgObj = { contactId: activeContact.id, fromMe: true, text: inputText, ts, seq, status: 'sending' };
-    await saveMessage(msgObj);
-    setMessages(prev => [...prev, msgObj]);
-    setInputText('');
   };
 
   return (

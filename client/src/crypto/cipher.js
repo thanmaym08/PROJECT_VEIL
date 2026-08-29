@@ -66,7 +66,7 @@ export async function encryptMessage(sessionKeyBytes, plaintextStr, fromCipherId
       additionalData: aad
     },
     key,
-    encodedPlaintext
+    paddedPlaintext
   );
 
   return {

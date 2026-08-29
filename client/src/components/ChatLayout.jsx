@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus } from '../storage/db';
 import { UserPlus, Settings, ShieldAlert, ShieldCheck, Send, Check, CheckCheck } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
@@ -94,6 +94,7 @@ export default function ChatLayout({ keys, myId }) {
       } else if (data.type === 'ack') {
         // Update message status
         setMessages(prev => prev.map(m => m.seq === data.seq ? { ...m, status: data.status } : m));
+        await updateMessageStatus(data.to, data.seq, data.status);
       } else if (data.type === 'lookup_res') {
         if (data.found && data.target) { // We passed target in request? Not in server.js. We need to handle lookup differently or add contact manually.
           // For simplicity, we add contacts manually.
@@ -136,7 +137,7 @@ export default function ChatLayout({ keys, myId }) {
         setMessages(prev => [...prev, msgObj]);
       }
     } catch (e) {
-      console.error("Message decryption failed");
+      console.error("Message decryption failed:", e);
     }
   };
 

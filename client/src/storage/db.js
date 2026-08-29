@@ -52,3 +52,29 @@ export async function getMessages(contactId) {
     req.onsuccess = () => resolve(req.result);
   });
 }
+
+export async function updateMessageStatus(contactId, seq, status) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("messages", "readwrite");
+    const store = tx.objectStore("messages");
+    const index = store.index("contactId");
+    const req = index.openCursor(IDBKeyRange.only(contactId));
+    
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        if (cursor.value.seq === seq) {
+          const updatedMsg = { ...cursor.value, status };
+          cursor.update(updatedMsg);
+          resolve();
+          return;
+        }
+        cursor.continue();
+      } else {
+        resolve(); // Not found
+      }
+    };
+    req.onerror = () => reject();
+  });
+}

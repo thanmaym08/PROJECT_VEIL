@@ -44,12 +44,25 @@ export default function ChatLayout({ keys, myId }) {
     setContacts(c);
   };
 
-  const connectWs = () => {
-    // Android Emulator uses 10.0.2.2 to point to the host machine's localhost
-    const wsUrl = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android' 
-      ? 'ws://10.0.2.2:8080' 
-      : 'ws://localhost:8080';
-      
+  const connectWs = (urlOverride = null) => {
+    // Determine the correct relay URL:
+    //   - Android Emulator: 10.0.2.2 maps to the host PC's localhost
+    //   - Physical Android phone: needs PC's real WiFi IP (same network)
+    //   - Web browser (dev): localhost
+    //
+    // Strategy: if native Android, try the emulator address first.
+    // If it fails to connect within 2.5s, fall back to the real device IP.
+    // This means the same APK works on both emulator AND real phone.
+    const RELAY_WIFI_IP = '10.136.97.31'; // ← Your PC's WiFi IP (run ipconfig to update)
+    let wsUrl;
+    if (urlOverride) {
+      wsUrl = urlOverride;
+    } else if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+      wsUrl = 'ws://10.0.2.2:8080'; // try emulator first
+    } else {
+      wsUrl = 'ws://localhost:8080';
+    }
+
     ws.current = new WebSocket(wsUrl);
     ws.current.onopen = async () => {
       setWsStatus('connected');
@@ -85,9 +98,20 @@ export default function ChatLayout({ keys, myId }) {
         fcmToken
       }));
     };
+
+    // Track whether we connected at least once (to distinguish first-time fail from drop)
+    let connectedOnce = false;
+    ws.current.addEventListener('open', () => { connectedOnce = true; });
+
     ws.current.onclose = () => {
       setWsStatus('disconnected');
-      setTimeout(connectWs, 5000);
+      if (!connectedOnce && wsUrl === 'ws://10.0.2.2:8080' && Capacitor.isNativePlatform()) {
+        // Emulator address failed on a real device → fall back to WiFi IP
+        console.log('[VEIL] Emulator URL failed, switching to WiFi IP...');
+        setTimeout(() => connectWs('ws://' + RELAY_WIFI_IP + ':8080'), 500);
+      } else {
+        setTimeout(connectWs, 5000);
+      }
     };
     ws.current.onmessage = async (e) => {
       const data = JSON.parse(e.data);

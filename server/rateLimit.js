@@ -43,13 +43,15 @@ export function checkMessageRateLimit(ip) {
 }
 
 export function validateOrigin(origin) {
-  // Strict origin allow-list (for local dev and future production)
+  // Explicit allow-list for web dev and Capacitor native
   const allowedOrigins = [
-    'http://localhost:5173', 
+    'http://localhost:5173',    // Vite dev server
     'http://127.0.0.1:5173',
-    'http://localhost:4173',
-    'http://127.0.0.1:4173'
+    'http://localhost:4173',    // Vite preview server
+    'http://127.0.0.1:4173',
+    'https://localhost',        // Capacitor Android/iOS
   ];
-  if (!origin) return true; // Some clients don't send origin in non-browser context
+  // null/undefined origin = native Capacitor app (no origin header)
+  if (!origin) return true;
   return allowedOrigins.includes(origin);
 }

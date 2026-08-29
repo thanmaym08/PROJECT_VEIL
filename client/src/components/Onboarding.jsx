@@ -1,22 +1,29 @@
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { generateCipherId, generateLongTermKeys } from '../crypto/identity';
 import { wrapAndStoreKeys } from '../crypto/keyStorage';
 import { ShieldCheck, Copy } from 'lucide-react';
+import { Clipboard } from '@capacitor/clipboard';
 
 export default function Onboarding({ onComplete }) {
   const [step, setStep] = useState(1);
-  const [cipherId, setCipherId] = useState('');
-  const [keys, setKeys] = useState(null);
   const [passphrase, setPassphrase] = useState('');
   const [nickname, setNickname] = useState('');
+  const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
-    setCipherId(generateCipherId());
-    setKeys(generateLongTermKeys());
-  }, []);
+  // Generate once on mount, never regenerate
+  const { cipherId, keys } = useMemo(() => ({
+    cipherId: generateCipherId(),
+    keys: generateLongTermKeys()
+  }), []);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(cipherId);
+  const handleCopy = async () => {
+    try {
+      await Clipboard.write({ string: cipherId });
+    } catch {
+      navigator.clipboard.writeText(cipherId);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const handleFinish = async (e) => {
@@ -51,10 +58,13 @@ export default function Onboarding({ onComplete }) {
             <div className="absolute inset-0 bg-gradient-to-b from-arc-cyan/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
             <div className="absolute top-0 left-0 w-full h-[1px] bg-arc-cyan opacity-0 group-hover:opacity-100 group-hover:animate-[scan_2s_linear_infinite]"></div>
             <div className="text-xl font-mono tracking-widest text-arc-cyan select-all break-all leading-relaxed">
-              {cipherId || 'GENERATING...'}
+              {cipherId}
             </div>
-            <div className="absolute bottom-1 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-              <Copy className="w-4 h-4 text-arc-cyan" />
+            <div className="absolute bottom-1 right-2 transition-opacity">
+              <span className={`text-[10px] font-hud tracking-widest ${copied ? 'text-arc-cyan' : 'text-arc-cyan/50'}`}>
+                {copied ? 'COPIED!' : ''}
+              </span>
+              <Copy className="w-4 h-4 text-arc-cyan inline ml-1" />
             </div>
           </div>
           

@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus } from '../storage/db';
-import { UserPlus, Settings, ShieldAlert, ShieldCheck, Send, Check, CheckCheck } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
-import { encryptMessage, decryptMessage, ReplayWindow } from '../crypto/cipher';
-import { bytesToBase64 } from '../crypto/utils';
+import { encryptMessage, decryptMessage } from '../crypto/cipher';
 import { Capacitor } from '@capacitor/core';
 
 export default function ChatLayout({ keys, myId }) {
@@ -20,6 +19,8 @@ export default function ChatLayout({ keys, myId }) {
   const ws = useRef(null);
   const sessionKeys = useRef({}); // contactId -> sessionKey
   const messagesEndRef = useRef(null);
+  // CRITICAL FIX: ref to contacts so WebSocket handlers always see fresh list
+  const contactsRef = useRef([]);
 
   useEffect(() => {
     loadContacts();
@@ -39,6 +40,7 @@ export default function ChatLayout({ keys, myId }) {
 
   const loadContacts = async () => {
     const c = await getContacts();
+    contactsRef.current = c;
     setContacts(c);
   };
 
@@ -92,20 +94,17 @@ export default function ChatLayout({ keys, myId }) {
       if (data.type === 'msg') {
         handleIncomingMessage(data);
       } else if (data.type === 'ack') {
-        // Update message status
+        // Update message status in UI and DB
         setMessages(prev => prev.map(m => m.seq === data.seq ? { ...m, status: data.status } : m));
         await updateMessageStatus(data.to, data.seq, data.status);
-      } else if (data.type === 'lookup_res') {
-        if (data.found && data.target) { // We passed target in request? Not in server.js. We need to handle lookup differently or add contact manually.
-          // For simplicity, we add contacts manually.
-        }
       }
     };
   };
 
   const handleIncomingMessage = async (data) => {
-    const contact = contacts.find(c => c.id === data.from);
-    if (!contact) return; // Drop messages from unknown contacts for now
+    // Use the ref so we always read the latest contacts, not a stale closure
+    const contact = contactsRef.current.find(c => c.id === data.from);
+    if (!contact) return; // Drop messages from unknown contacts
 
     try {
       let sessionKey = sessionKeys.current[data.from];

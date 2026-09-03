@@ -123,7 +123,7 @@ export default function ChatLayout({ keys, myId }) {
     }
 
     if (Capacitor.isNativePlatform()) {
-      return 'ws://10.136.97.31:8080';
+      return 'ws://10.0.2.2:8080';
     }
 
     if (typeof window !== 'undefined' && window.location) {
@@ -199,6 +199,11 @@ export default function ChatLayout({ keys, myId }) {
     socket.onclose = () => {
       if (ws.current !== socket) return;
       setWsStatus('disconnected');
+      if (!urlOverride && Capacitor.isNativePlatform() && wsUrl === 'ws://10.0.2.2:8080') {
+        console.log('[VEIL] Emulator loopback failed, trying WiFi IP fallback...');
+        setTimeout(() => connectWs('ws://10.136.97.31:8080'), 1000);
+        return;
+      }
       setTimeout(() => {
         if (ws.current === socket || !ws.current || ws.current.readyState === WebSocket.CLOSED) {
           connectWs(urlOverride);
@@ -531,9 +536,21 @@ export default function ChatLayout({ keys, myId }) {
         <div className="p-4 border-b border-arc-cyan/20 flex justify-between items-center bg-arc-cyan/5">
           <div>
             <h2 className="font-hud font-bold tracking-[0.2em] text-arc-cyan text-lg md:text-xl">PROJECT VEIL // QUANTUM RELAY</h2>
-            <div className="text-xs text-arc-cyan/70 font-mono flex items-center gap-2 mt-1">
+            <div 
+              onClick={() => {
+                const current = localStorage.getItem('veil_relay_url') || getWsUrl();
+                const newUrl = window.prompt("VEIL Relay WebSocket URL:", current);
+                if (newUrl !== null && newUrl.trim() !== '') {
+                  localStorage.setItem('veil_relay_url', newUrl.trim());
+                  if (ws.current) ws.current.close();
+                  connectWs(newUrl.trim());
+                }
+              }}
+              title="Click to view/change Relay Server URL"
+              className="text-xs text-arc-cyan/70 font-mono flex items-center gap-2 mt-1 cursor-pointer hover:underline"
+            >
               <div className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'connected' ? 'bg-arc-cyan animate-pulse shadow-glow-cyan' : 'bg-stark-crimson shadow-glow-crimson'}`} />
-              STATUS: {wsStatus === 'connected' ? 'ENCRYPTED (ML-KEM-768)' : 'OFFLINE'}
+              STATUS: {wsStatus === 'connected' ? 'ENCRYPTED (ML-KEM-768)' : 'OFFLINE (TAP TO CONFIGURE)'}
             </div>
             <div className="text-[10px] text-arc-cyan/50 font-mono mt-1 border border-arc-cyan/20 px-1 inline-block">ID: {myId.slice(0, 12)}...</div>
           </div>

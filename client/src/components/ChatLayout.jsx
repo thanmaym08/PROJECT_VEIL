@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
+import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
 import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
-import { encryptMessage, decryptMessage } from '../crypto/cipher';
+import { DoubleRatchet } from '../crypto/ratchet';
+import { base64ToBytes } from '../crypto/utils';
 import { Capacitor } from '@capacitor/core';
 
 export default function ChatLayout({ keys, myId }) {
@@ -16,11 +18,21 @@ export default function ChatLayout({ keys, myId }) {
   const [showSafetyNumber, setShowSafetyNumber] = useState(false);
   const [inputText, setInputText] = useState('');
   
+  const [typingUsers, setTypingUsers] = useState({});
+  const typingTimeouts = useRef({});
+  
+  const [vanishModes, setVanishModes] = useState({}); // contactId -> ttl in ms
+  const [showVanishMenu, setShowVanishMenu] = useState(false);
+  
   const ws = useRef(null);
   const sessionKeys = useRef({}); // contactId -> sessionKey
   const messagesEndRef = useRef(null);
   // CRITICAL FIX: ref to contacts so WebSocket handlers always see fresh list
   const contactsRef = useRef([]);
+  const activeContactRef = useRef(null);
+  const pendingBundleRequests = useRef({});
+  const serverIdentityPubRef = useRef(null);
+  const mySenderCertRef = useRef(null);
 
   useEffect(() => {
     loadContacts();
@@ -33,38 +45,78 @@ export default function ChatLayout({ keys, myId }) {
   }, [messages]);
 
   useEffect(() => {
+    activeContactRef.current = activeContact;
     if (activeContact) {
       getMessages(activeContact.id).then(setMessages);
     }
   }, [activeContact]);
 
+  // Read Receipts & Self-Destruct trigger
+  useEffect(() => {
+    if (activeContact && ws.current?.readyState === WebSocket.OPEN) {
+      const unread = messages.filter(m => !m.fromMe && m.status !== 'read');
+      if (unread.length > 0) {
+        const seqs = unread.map(m => m.seq);
+        ws.current.send(JSON.stringify({ type: 'read', from: myId, to: activeContact.id, seqs }));
+        
+        const now = Date.now();
+        setMessages(prev => prev.map(m => seqs.includes(m.seq) ? { ...m, status: 'read', readAt: now } : m));
+        seqs.forEach(seq => updateMessageStatus(activeContact.id, seq, 'read', { readAt: now }));
+      }
+    }
+  }, [messages, activeContact, myId]);
+
+  // Self-Destruct Sweeper
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTick(t => t + 1); // Force re-render for countdown UI
+      setMessages(prev => {
+        let changed = false;
+        const now = Date.now();
+        const filtered = prev.filter(m => {
+          if (m.ttl > 0 && m.status === 'read' && m.readAt) {
+            if (now - m.readAt >= m.ttl) {
+              changed = true;
+              deleteMessage(activeContactRef.current?.id, m.seq).catch(()=>{});
+              return false;
+            }
+          }
+          return true;
+        });
+        return changed ? filtered : prev;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const loadContacts = async () => {
     const c = await getContacts();
     contactsRef.current = c;
     setContacts(c);
+    
+    // Load ratchet states
+    const { getRatchetState } = await import('../crypto/keyStorage.js');
+    const { DoubleRatchet } = await import('../crypto/ratchet.js');
+    for (const contact of c) {
+      try {
+        const stateStr = await getRatchetState(contact.id);
+        if (stateStr) {
+          sessionKeys.current[contact.id] = DoubleRatchet.deserialize(stateStr);
+        }
+      } catch (e) {
+        console.error("Failed to load ratchet state for", contact.id, e);
+      }
+    }
   };
 
-  const connectWs = (urlOverride = null) => {
-    // Determine the correct relay URL:
-    //   - Android Emulator: 10.0.2.2 maps to the host PC's localhost
-    //   - Physical Android phone: needs PC's real WiFi IP (same network)
-    //   - Web browser (dev): localhost
-    //
-    // Strategy: if native Android, try the emulator address first.
-    // If it fails to connect within 2.5s, fall back to the real device IP.
-    // This means the same APK works on both emulator AND real phone.
-    const RELAY_WIFI_IP = '10.136.97.31'; // ← Your PC's WiFi IP (run ipconfig to update)
-    let wsUrl;
-    if (urlOverride) {
-      wsUrl = urlOverride;
-    } else if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
-      wsUrl = 'ws://10.0.2.2:8080'; // try emulator first
-    } else {
-      wsUrl = 'ws://localhost:8080';
-    }
+  const connectWs = async (urlOverride = null) => {
+    let wsUrl = urlOverride || 'wss://compiler-examples-grown-unlimited.trycloudflare.com';
+    const socket = new WebSocket(wsUrl);
+    ws.current = socket;
 
-    ws.current = new WebSocket(wsUrl);
-    ws.current.onopen = async () => {
+    socket.onopen = async () => {
+      if (ws.current !== socket) return;
       setWsStatus('connected');
 
       let fcmToken = null;
@@ -82,7 +134,6 @@ export default function ChatLayout({ keys, myId }) {
               PushNotifications.addListener('registrationError', () => resolve(null));
               setTimeout(() => resolve(null), 3000);
             });
-            // Remove listeners so they don't stack on reconnect
             await PushNotifications.removeAllListeners();
           }
         } catch (e) {
@@ -90,77 +141,225 @@ export default function ChatLayout({ keys, myId }) {
         }
       }
 
-      ws.current.send(JSON.stringify({
-        type: 'register',
-        cipherId: myId,
-        mlkemPub: keys.mlkem.publicKeyB64,
-        x25519Pub: keys.x25519.publicKeyB64,
-        fcmToken
-      }));
-    };
-
-    // Track whether we connected at least once (to distinguish first-time fail from drop)
-    let connectedOnce = false;
-    ws.current.addEventListener('open', () => { connectedOnce = true; });
-
-    ws.current.onclose = () => {
-      setWsStatus('disconnected');
-      if (!connectedOnce && wsUrl === 'ws://10.0.2.2:8080' && Capacitor.isNativePlatform()) {
-        // Emulator address failed on a real device → fall back to WiFi IP
-        console.log('[VEIL] Emulator URL failed, switching to WiFi IP...');
-        setTimeout(() => connectWs('ws://' + RELAY_WIFI_IP + ':8080'), 500);
+      let localPreKeys = await getLocalPreKeys();
+      let bundle = null;
+      if (!localPreKeys || !localPreKeys.publicBundle) {
+        const generated = generatePreKeyBundle(base64ToBytes(keys.ed25519.secretKeyB64));
+        localPreKeys = { ...generated.privateMaterial, publicBundle: generated.publicBundle };
+        await saveLocalPreKeys(localPreKeys);
+        bundle = generated.publicBundle;
       } else {
-        setTimeout(connectWs, 5000);
+        bundle = localPreKeys.publicBundle;
+      }
+
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'register',
+          cipherId: myId,
+          mlkemPub: keys.mlkem.publicKeyB64,
+          x25519Pub: keys.x25519.publicKeyB64,
+          ed25519Pub: keys.ed25519.publicKeyB64,
+          deliveryToken: keys.profile.deliveryTokenB64,
+          fcmToken,
+          bundle
+        }));
       }
     };
-    ws.current.onmessage = async (e) => {
+
+    socket.onclose = () => {
+      if (ws.current !== socket) return;
+      setWsStatus('disconnected');
+      setTimeout(() => {
+        if (ws.current === socket || !ws.current || ws.current.readyState === WebSocket.CLOSED) {
+          connectWs();
+        }
+      }, 3000);
+    };
+
+    socket.onerror = (e) => {
+      console.warn("WebSocket error:", e);
+    };
+
+    socket.onmessage = async (e) => {
+      if (ws.current !== socket) return;
       const data = JSON.parse(e.data);
-      if (data.type === 'msg') {
+      if (data.type === 'typing') {
+        const from = data.from;
+        setTypingUsers(prev => ({ ...prev, [from]: true }));
+        if (typingTimeouts.current[from]) clearTimeout(typingTimeouts.current[from]);
+        typingTimeouts.current[from] = setTimeout(() => {
+          setTypingUsers(prev => ({ ...prev, [from]: false }));
+        }, 3000);
+      } else if (data.type === 'msg') {
         handleIncomingMessage(data);
       } else if (data.type === 'ack') {
         // Update message status in UI and DB
         setMessages(prev => prev.map(m => m.seq === data.seq ? { ...m, status: data.status } : m));
         await updateMessageStatus(data.to, data.seq, data.status);
+      } else if (data.type === 'read') {
+        const now = Date.now();
+        setMessages(prev => prev.map(m => data.seqs.includes(m.seq) ? { ...m, status: 'read', readAt: now } : m));
+        for (const seq of data.seqs) {
+          await updateMessageStatus(data.from, seq, 'read', { readAt: now });
+        }
+      } else if (data.type === 'vanish_mode') {
+        setVanishModes(prev => ({ ...prev, [data.from]: data.ttl }));
+      } else if (data.type === 'prekeys_res') {
+        const resolver = pendingBundleRequests.current[data.targetCipherId];
+        if (resolver) {
+          resolver(data.bundle || null);
+          delete pendingBundleRequests.current[data.targetCipherId];
+        }
+      } else if (data.type === 'register_ack') {
+        serverIdentityPubRef.current = data.serverIdentityPub;
+        if (data.replenishOpks > 0) {
+          const { privs, pubs } = generateOneTimePreKeys(data.replenishOpks);
+          getLocalPreKeys().then(local => {
+            if (local) {
+              local.oneTimePreKeys = [...local.oneTimePreKeys, ...privs];
+              saveLocalPreKeys(local);
+            }
+          });
+          ws.current.send(JSON.stringify({ type: 'upload_opk', cipherId: myId, oneTimePreKeys: pubs }));
+        }
+        // Fetch sender cert after registering
+        ws.current.send(JSON.stringify({ type: 'get_sender_cert' }));
+        
+        // Flush outbox
+        import('../storage/db.js').then(({ getAndClearOutbox }) => {
+          getAndClearOutbox().then(outbox => {
+            outbox.forEach(env => {
+              if (ws.current?.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify(env));
+              }
+            });
+          });
+        });
+      } else if (data.type === 'sender_cert_res') {
+        mySenderCertRef.current = data.cert;
+      } else if (data.type === 'session_repair') {
+        const from = data.from;
+        console.warn("Session repair requested by:", from);
+        delete sessionKeys.current[from];
+        import('../crypto/keyStorage.js').then(({ saveRatchetState }) => {
+          saveRatchetState(from, null).catch(() => {});
+        });
+      } else if (data.type === 'sealed_msg') {
+        handleIncomingMessage(data, true);
       }
     };
   };
 
-  const handleIncomingMessage = async (data) => {
-    // Use the ref so we always read the latest contacts, not a stale closure
-    const contact = contactsRef.current.find(c => c.id === data.from);
-    if (!contact) return; // Drop messages from unknown contacts
-
+  const handleIncomingMessage = async (data, isSealed = false) => {
+    let senderId = data.from;
     try {
-      let sessionKey = sessionKeys.current[data.from];
-      if (!sessionKey && data.ekpub && data.kemct) {
-        // We are receiver, establish session
-        const sess = computeReceiverSession(
-          data.kemct, data.ekpub, 
-          keys.mlkem.secretKeyB64, keys.x25519.secretKeyB64, 
-          data.from, myId
+      let msgData = data;
+
+      if (isSealed) {
+        const { unsealMessage } = await import('../crypto/sealedSender.js');
+        const unsealed = await unsealMessage(
+          data.ephemeralPublicKey, 
+          data.envelopeCiphertext, 
+          data.iv,
+          data.mac, 
+          keys.x25519.secretKeyB64, 
+          serverIdentityPubRef.current
         );
-        sessionKey = sess.sessionKey;
-        sessionKeys.current[data.from] = sessionKey;
+        senderId = unsealed.senderId;
+        msgData = JSON.parse(unsealed.payload);
+      }
+
+      const contact = contactsRef.current.find(c => c.id === senderId);
+      if (!contact) return; // Drop messages from unknown contacts
+
+      let ratchet = sessionKeys.current[senderId];
+      if (msgData.ekpub && msgData.kemct) {
+        // Handshake packet from sender - always compute fresh receiver session
+        const localPreKeys = await getLocalPreKeys();
+        if (!localPreKeys) throw new Error("No local prekeys found");
+        
+        let opkPrivB64 = null;
+        if (msgData.opkId) {
+          const opkIndex = localPreKeys.oneTimePreKeys.findIndex(k => k.id === msgData.opkId);
+          if (opkIndex !== -1) {
+            opkPrivB64 = localPreKeys.oneTimePreKeys[opkIndex].priv;
+            // Delete consumed OPK from local storage immediately for forward secrecy
+            localPreKeys.oneTimePreKeys.splice(opkIndex, 1);
+            saveLocalPreKeys(localPreKeys).catch(() => {});
+          }
+        }
+
+        const sess = computeReceiverSession(
+          msgData.ekpub, msgData.kemct, contact.x25519Pub, msgData.opkId,
+          keys.x25519.secretKeyB64,
+          localPreKeys.signedPreKey,
+          localPreKeys.signedPqPreKey,
+          opkPrivB64,
+          senderId, myId
+        );
+        const mySpkPriv = base64ToBytes(localPreKeys.signedPreKey);
+        const senderEkPub = base64ToBytes(msgData.ekpub);
+        ratchet = new DoubleRatchet(sess.sessionKey, false, senderEkPub, mySpkPriv);
+        sessionKeys.current[senderId] = ratchet;
       }
       
-      if (!sessionKey) throw new Error("No session key");
+      if (!ratchet) throw new Error("No session key");
 
-      const decrypted = await decryptMessage(sessionKey, data.iv, data.ct, data.from, myId, data.seq, data.ts);
+      const decrypted = await ratchet.decryptMessage(msgData.rh, msgData.iv, msgData.ct);
+      
+      const { saveRatchetState } = await import('../crypto/keyStorage.js');
+      await saveRatchetState(senderId, ratchet.serialize());
+
+      let text = decrypted;
+      let contactToken = null;
+      try {
+        const payload = JSON.parse(decrypted);
+        if (payload.text) text = payload.text;
+        if (payload.deliveryToken) contactToken = payload.deliveryToken;
+      } catch (e) {
+        // legacy plaintext
+      }
+      
+      if (contactToken && contact.deliveryToken !== contactToken) {
+        const updated = { ...contact, deliveryToken: contactToken };
+        await saveContact(updated);
+        // Need to update state too
+        setContacts(prev => prev.map(c => c.id === contact.id ? updated : c));
+        // Update ref immediately
+        const idx = contactsRef.current.findIndex(c => c.id === contact.id);
+        if (idx !== -1) contactsRef.current[idx] = updated;
+      }
       
       const msgObj = {
-        contactId: data.from,
+        contactId: senderId,
         fromMe: false,
-        text: decrypted,
-        ts: data.ts,
-        seq: data.seq
+        text,
+        ts: msgData.ts,
+        seq: msgData.seq,
+        ttl: msgData.ttl || 0
       };
       await saveMessage(msgObj);
       
-      if (activeContact && activeContact.id === data.from) {
+      if (activeContactRef.current && activeContactRef.current.id === senderId) {
         setMessages(prev => [...prev, msgObj]);
+        setTypingUsers(prev => ({ ...prev, [senderId]: false }));
       }
     } catch (e) {
-      console.error("Message decryption failed:", e);
+      console.error("Message processing failed:", e);
+      const errMsg = e.message || e.name || "Unknown WebCrypto Error";
+      
+      // Auto-repair signal: If decryption failed, request session repair from sender
+      if (senderId && ws.current?.readyState === WebSocket.OPEN) {
+        delete sessionKeys.current[senderId];
+        import('../crypto/keyStorage.js').then(({ saveRatchetState }) => {
+          saveRatchetState(senderId, null).catch(() => {});
+        });
+        ws.current.send(JSON.stringify({ type: 'session_repair', from: myId, to: senderId }));
+      }
+
+      if (activeContactRef.current && (activeContactRef.current.id === senderId || activeContactRef.current.id === data.from || data.type === 'sealed_msg')) {
+        setMessages(prev => [...prev, { contactId: activeContactRef.current?.id || 'unknown', fromMe: false, text: `[AUTO-REPAIR]: Session desync detected. Requesting automatic re-key... (${errMsg})`, ts: Date.now(), seq: Date.now(), ttl: 0 }]);
+      }
     }
   };
 
@@ -169,40 +368,123 @@ export default function ChatLayout({ keys, myId }) {
     if (!inputText.trim() || !activeContact) return;
 
     try {
-      let sessionKey = sessionKeys.current[activeContact.id];
+      let ratchet = sessionKeys.current[activeContact.id];
       let ekpub = undefined, kemct = undefined;
 
-      if (!sessionKey) {
-        const sess = computeInitiatorSession(
-          activeContact.mlkemPub, activeContact.x25519Pub,
-          myId, activeContact.id
-        );
-        sessionKey = sess.sessionKey;
-        sessionKeys.current[activeContact.id] = sessionKey;
-        ekpub = sess.ephemeralX25519PubB64;
-        kemct = sess.kemCiphertextB64;
+      let opkId = undefined;
+
+      if (!ratchet) {
+        // Fetch bundle (will hit prefetch or wait for it)
+        const bundle = await new Promise((resolve) => {
+          if (pendingBundleRequests.current[activeContact.id]) {
+            // Already fetching, intercept it
+            const existing = pendingBundleRequests.current[activeContact.id];
+            pendingBundleRequests.current[activeContact.id] = (b) => {
+              existing(b);
+              resolve(b);
+            };
+          } else {
+            pendingBundleRequests.current[activeContact.id] = resolve;
+            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: activeContact.id }));
+          }
+          setTimeout(() => {
+            if (pendingBundleRequests.current[activeContact.id]) {
+              delete pendingBundleRequests.current[activeContact.id];
+              resolve(null);
+            }
+          }, 5000); // 5 sec timeout
+        });
+
+        if (!bundle) throw new Error("Could not fetch prekeys");
+        
+        // Wait a tick for prefetch to finish calculating, or calculate ourselves if we initiated it
+        if (!sessionKeys.current[activeContact.id]) {
+          verifyPreKeyBundle(bundle, activeContact.ed25519Pub);
+          const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, activeContact.id);
+          const theirPub = base64ToBytes(bundle.signedPreKey.pub);
+          ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
+          ratchet.ekpub = sess.ephemeralX25519PubB64;
+          ratchet.kemct = sess.kemCiphertextB64;
+          ratchet.opkId = sess.opkId;
+          sessionKeys.current[activeContact.id] = ratchet;
+        } else {
+          ratchet = sessionKeys.current[activeContact.id];
+        }
+      }
+
+      // Check if this is the first message for this session where we need to attach handshake material
+      if (ratchet.ekpub && ratchet.kemct) {
+        ekpub = ratchet.ekpub;
+        kemct = ratchet.kemct;
+        opkId = ratchet.opkId;
+        // Do not delete them yet, keep them in case the first message is lost? 
+        // Signal attaches them to *every* message until a reply is received, but for now we'll just attach once
+        delete ratchet.ekpub;
+        delete ratchet.kemct;
+        delete ratchet.opkId;
       }
 
       const seq = Date.now(); // simple seq generator
       const ts = Date.now();
       
-      // Pad to 8KB (optional, skipping for simple UI)
-      const { ivB64, ciphertextB64 } = await encryptMessage(sessionKey, inputText, myId, activeContact.id, seq, ts);
+      const ttl = vanishModes[activeContact.id] || 0;
+      
+      // Include delivery token in plaintext payload so contact can reply blindly
+      const innerPayload = JSON.stringify({
+         text: inputText,
+         deliveryToken: keys.profile.deliveryTokenB64
+      });
+      
+      const { header, iv, ct } = await ratchet.encryptMessage(innerPayload);
+
+      const { saveRatchetState } = await import('../crypto/keyStorage.js');
+      await saveRatchetState(activeContact.id, ratchet.serialize());
 
       const envelope = {
         v: 1, type: 'msg',
-        from: myId, to: activeContact.id,
-        seq, ts, iv: ivB64, ct: ciphertextB64
+        from: myId, to: activeContact.id, // we will strip from if sealed
+        seq, ts, iv, ct, rh: header, ttl
       };
       
       if (ekpub && kemct) {
         envelope.ekpub = ekpub;
         envelope.kemct = kemct;
+        if (opkId) envelope.opkId = opkId;
       }
 
-      ws.current.send(JSON.stringify(envelope));
+      let finalPayload = envelope;
+      if (activeContact.deliveryToken && mySenderCertRef.current) {
+        // Sealed Sender Flow!
+        const { sealMessage } = await import('../crypto/sealedSender.js');
+        
+        // Remove from entirely!
+        delete envelope.from;
+        
+        const sealedEnvelope = await sealMessage(
+           activeContact.x25519Pub,
+           mySenderCertRef.current,
+           JSON.stringify(envelope) // The inner ratchet msg is the inner payload
+        );
+        
+        finalPayload = {
+          type: 'sealed_msg',
+          to: activeContact.id,
+          ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
+          envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
+          mac: sealedEnvelope.mac,
+          iv: sealedEnvelope.iv,
+          deliveryToken: activeContact.deliveryToken
+        };
+      }
       
-      const msgObj = { contactId: activeContact.id, fromMe: true, text: inputText, ts, seq, status: 'sending' };
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify(finalPayload));
+      } else {
+        const { saveToOutbox } = await import('../storage/db.js');
+        await saveToOutbox(finalPayload);
+      }
+      
+      const msgObj = { contactId: activeContact.id, fromMe: true, text: inputText, ts, seq, status: 'sending', ttl };
       await saveMessage(msgObj);
       setMessages(prev => [...prev, msgObj]);
       setInputText('');
@@ -285,10 +567,55 @@ export default function ChatLayout({ keys, myId }) {
                 <div className="hidden md:inline-block text-[10px] text-arc-cyan/50 font-mono ml-2">[HYBRID: ML-KEM + X25519]</div>
               </div>
             </div>
-            <button onClick={() => setShowSafetyNumber(true)} className={`px-2 py-1 md:px-4 md:py-2 rounded-sm border transition-all text-[10px] md:text-xs font-hud tracking-[0.1em] flex items-center gap-1 md:gap-2 ${activeContact.verified ? 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan' : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'}`}>
-              {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-              <span className="hidden md:inline">{activeContact.verified ? 'LINK SECURED' : 'AUTHENTICATE'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <button 
+                  onClick={() => setShowVanishMenu(!showVanishMenu)}
+                  className={`px-2 py-1 md:px-3 md:py-2 border text-[9px] md:text-[10px] font-mono tracking-widest transition-all ${
+                    (vanishModes[activeContact.id] || 0) > 0 
+                      ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold' 
+                      : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan'
+                  }`}
+                >
+                  {(vanishModes[activeContact.id] || 0) === 0 ? 'VANISH: OFF' : 
+                   (vanishModes[activeContact.id] === 5000) ? 'VANISH: 5s' : 
+                   (vanishModes[activeContact.id] === 60000) ? 'VANISH: 1m' : 'VANISH: 1h'}
+                </button>
+                {showVanishMenu && (
+                  <div className="absolute top-full right-0 mt-1 w-32 bg-stark-bg border border-arc-cyan shadow-glow-cyan z-50 flex flex-col">
+                    {[
+                      { label: 'OFF', value: 0 },
+                      { label: '5 SECONDS', value: 5000 },
+                      { label: '1 MINUTE', value: 60000 },
+                      { label: '1 HOUR', value: 3600000 }
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => {
+                          const ttl = opt.value;
+                          setVanishModes(prev => ({ ...prev, [activeContact.id]: ttl }));
+                          if (ws.current?.readyState === WebSocket.OPEN) {
+                            ws.current.send(JSON.stringify({ type: 'vanish_mode', from: myId, to: activeContact.id, ttl }));
+                          }
+                          setShowVanishMenu(false);
+                        }}
+                        className={`text-left px-3 py-2 text-[10px] font-mono tracking-wider transition-colors ${
+                          (vanishModes[activeContact.id] || 0) === opt.value 
+                            ? 'bg-arc-cyan text-stark-bg font-bold' 
+                            : 'text-arc-cyan hover:bg-arc-cyan/20'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button onClick={() => setShowSafetyNumber(true)} className={`px-2 py-1 md:px-4 md:py-2 rounded-sm border transition-all text-[10px] md:text-xs font-hud tracking-[0.1em] flex items-center gap-1 md:gap-2 ${activeContact.verified ? 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan' : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'}`}>
+                {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
+                <span className="hidden md:inline">{activeContact.verified ? 'LINK SECURED' : 'AUTHENTICATE'}</span>
+              </button>
+            </div>
           </div>
 
           {/* Messages */}
@@ -297,19 +624,39 @@ export default function ChatLayout({ keys, myId }) {
               <div key={m.seq} className={`max-w-[85%] md:max-w-[80%] p-3 md:p-4 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}>
                 <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : 'text-gray-200'} break-words`}>{m.text}</div>
                 <div className="text-[9px] md:text-[10px] font-mono text-arc-cyan/50 mt-2 flex justify-end items-center gap-2">
+                  {m.ttl > 0 && m.status === 'read' && m.readAt && (
+                    <span className="text-stark-gold font-bold flex items-center gap-1">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                      {Math.max(0, Math.ceil((m.ttl - (Date.now() - m.readAt)) / 1000))}s
+                    </span>
+                  )}
                   <span className="opacity-50 uppercase">{new Date(m.ts).toLocaleTimeString()}</span>
                   {m.fromMe && (
-                    <div className="flex items-center gap-1 font-hud tracking-widest text-arc-cyan">
-                      {m.status === 'delivered' ? (
-                         <><CheckCheck size={12} /> ROUTED</>
+                    <div className="flex items-center gap-1 font-hud tracking-widest">
+                      {m.status === 'read' ? (
+                         <><CheckCheck size={12} className="text-[#3b82f6]" /> <span className="text-[#3b82f6]">READ</span></>
+                      ) : m.status === 'delivered' ? (
+                         <><CheckCheck size={12} className="text-arc-cyan" /> <span className="text-arc-cyan">ROUTED</span></>
                       ) : (
-                         <><Check size={12} className="opacity-50" /> QUEUED</>
+                         <><Check size={12} className="text-arc-cyan/50" /> <span className="text-arc-cyan/50">QUEUED</span></>
                       )}
                     </div>
                   )}
                 </div>
               </div>
             ))}
+            
+            {/* Typing Indicator */}
+            {typingUsers[activeContact.id] && (
+              <div className="bg-stark-card border-l-2 border-arc-cyan/50 mr-auto p-3 rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg animate-pulse max-w-[80%]">
+                <div className="font-mono text-[10px] text-arc-cyan flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '0ms'}}/>
+                  <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '150ms'}}/>
+                  <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '300ms'}}/>
+                  <span className="ml-2 uppercase tracking-widest">TRANSMITTING...</span>
+                </div>
+              </div>
+            )}
             <div ref={messagesEndRef} />
           </div>
 
@@ -323,7 +670,16 @@ export default function ChatLayout({ keys, myId }) {
               <div className="flex gap-2">
                 <input 
                   value={inputText}
-                  onChange={e => setInputText(e.target.value)}
+                  onChange={e => {
+                    setInputText(e.target.value);
+                    if (ws.current?.readyState === WebSocket.OPEN && activeContact) {
+                      // Throttle typing indicators
+                      if (!window.lastTypingTime || Date.now() - window.lastTypingTime > 1500) {
+                        window.lastTypingTime = Date.now();
+                        ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: activeContact.id }));
+                      }
+                    }
+                  }}
                   className="flex-1 bg-stark-surface border border-arc-cyan/30 p-2 md:p-3 font-mono text-xs text-arc-cyan placeholder:text-arc-cyan/30 focus:outline-none focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50 transition-all"
                   placeholder="> Enter transmission..."
                   maxLength={8000}

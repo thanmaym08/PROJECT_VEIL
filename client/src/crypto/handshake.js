@@ -14,54 +14,128 @@ function computeSalt(cipherIdA, cipherIdB) {
   return sha256(input);
 }
 
-export function computeInitiatorSession(recipientMlkemPubB64, recipientX25519PubB64, senderCipherId, recipientCipherId) {
-  // Ephemeral X25519
+export function computeInitiatorSession(bundle, myX25519PrivB64, senderCipherId, recipientCipherId) {
+  const myXPriv = base64ToBytes(myX25519PrivB64);
   const ephemeralPriv = x25519.utils.randomSecretKey();
   const ephemeralPub = x25519.getPublicKey(ephemeralPriv);
 
-  // ML-KEM Encapsulation
-  const recipientMlkemPub = base64ToBytes(recipientMlkemPubB64);
-  const { cipherText: kemCiphertext, sharedSecret: mlkemSecret } = ml_kem768.encapsulate(recipientMlkemPub);
+  // Bob's public keys from bundle
+  const bobIdX = base64ToBytes(bundle.identity.identityX25519Pub);
+  const bobSpkX = base64ToBytes(bundle.signedPreKey.pub);
+  
+  // X3DH Steps
+  const dh1 = x25519.getSharedSecret(ephemeralPriv, bobIdX);
+  const dh2 = x25519.getSharedSecret(myXPriv, bobSpkX);
+  const dh3 = x25519.getSharedSecret(ephemeralPriv, bobSpkX);
+  
+  let dh4 = new Uint8Array(0);
+  let opkId = null;
+  if (bundle.oneTimePreKey) {
+    opkId = bundle.oneTimePreKey.id;
+    const bobOpkX = base64ToBytes(bundle.oneTimePreKey.pub);
+    dh4 = x25519.getSharedSecret(ephemeralPriv, bobOpkX);
+  }
 
-  // X25519 ECDH
-  const recipientX25519Pub = base64ToBytes(recipientX25519PubB64);
-  const x25519Secret = x25519.getSharedSecret(ephemeralPriv, recipientX25519Pub);
+  // PQXDH Step
+  const bobPqPub = base64ToBytes(bundle.signedPqPreKey.pub);
+  const { cipherText: kemCiphertext, sharedSecret: pqSecret } = ml_kem768.encapsulate(bobPqPub);
 
-  // IKM
-  const ikm = new Uint8Array(mlkemSecret.length + x25519Secret.length);
-  ikm.set(mlkemSecret, 0);
-  ikm.set(x25519Secret, mlkemSecret.length);
+  // Combine IKM
+  const ikmLen = dh1.length + dh2.length + dh3.length + dh4.length + pqSecret.length;
+  const ikm = new Uint8Array(ikmLen);
+  let offset = 0;
+  
+  ikm.set(dh1, offset); offset += dh1.length;
+  ikm.set(dh2, offset); offset += dh2.length;
+  ikm.set(dh3, offset); offset += dh3.length;
+  if (dh4.length > 0) {
+    ikm.set(dh4, offset); offset += dh4.length;
+  }
+  ikm.set(pqSecret, offset);
 
-  // Salt
+  // Derive Session Key
   const salt = computeSalt(senderCipherId, recipientCipherId);
-
-  // HKDF
-  const info = utf8ToBytes("VEIL-v1-session-key");
+  const info = utf8ToBytes("VEIL-PQXDH-v1");
   const sessionKey = hkdf(sha256, ikm, salt, info, 32);
+
+  // Hygiene
+  ephemeralPriv.fill(0);
+  pqSecret.fill(0);
+  dh1.fill(0); dh2.fill(0); dh3.fill(0); 
+  if (dh4.length > 0) dh4.fill(0);
+  ikm.fill(0);
+  myXPriv.fill(0);
 
   return {
     sessionKey,
-    kemCiphertextB64: bytesToBase64(kemCiphertext),
     ephemeralX25519PubB64: bytesToBase64(ephemeralPub),
+    kemCiphertextB64: bytesToBase64(kemCiphertext),
+    opkId
   };
 }
 
-export function computeReceiverSession(kemCiphertextB64, senderEphemeralX25519PubB64, myMlkemPrivB64, myX25519PrivB64, senderCipherId, recipientCipherId) {
+export function computeReceiverSession(
+  senderEphemeralX25519PubB64, 
+  kemCiphertextB64, 
+  senderX25519PubB64, 
+  opkId,
+  myIdentityX25519PrivB64, 
+  mySignedPreKeyPrivB64, 
+  mySignedPqPreKeyPrivB64, 
+  myOneTimePreKeyPrivB64, // Can be null
+  senderCipherId, recipientCipherId
+) {
+  const senderEphemeralPub = base64ToBytes(senderEphemeralX25519PubB64);
+  const senderIdPub = base64ToBytes(senderX25519PubB64);
+  
+  const myIdPriv = base64ToBytes(myIdentityX25519PrivB64);
+  const mySpkPriv = base64ToBytes(mySignedPreKeyPrivB64);
+
+  // X3DH Steps
+  const dh1 = x25519.getSharedSecret(myIdPriv, senderEphemeralPub);
+  const dh2 = x25519.getSharedSecret(mySpkPriv, senderIdPub);
+  const dh3 = x25519.getSharedSecret(mySpkPriv, senderEphemeralPub);
+  
+  let dh4 = new Uint8Array(0);
+  if (opkId && myOneTimePreKeyPrivB64) {
+    const myOpkPriv = base64ToBytes(myOneTimePreKeyPrivB64);
+    dh4 = x25519.getSharedSecret(myOpkPriv, senderEphemeralPub);
+    myOpkPriv.fill(0);
+  } else if (opkId && !myOneTimePreKeyPrivB64) {
+    throw new Error("Sender used OPK but we don't have the private key");
+  }
+
+  // PQXDH Step
   const kemCiphertext = base64ToBytes(kemCiphertextB64);
-  const myMlkemPriv = base64ToBytes(myMlkemPrivB64);
-  const mlkemSecret = ml_kem768.decapsulate(kemCiphertext, myMlkemPriv);
+  const myPqPriv = base64ToBytes(mySignedPqPreKeyPrivB64);
+  const pqSecret = ml_kem768.decapsulate(kemCiphertext, myPqPriv);
 
-  const senderEphemeralX25519Pub = base64ToBytes(senderEphemeralX25519PubB64);
-  const myX25519Priv = base64ToBytes(myX25519PrivB64);
-  const x25519Secret = x25519.getSharedSecret(myX25519Priv, senderEphemeralX25519Pub);
+  // Combine IKM
+  const ikmLen = dh1.length + dh2.length + dh3.length + dh4.length + pqSecret.length;
+  const ikm = new Uint8Array(ikmLen);
+  let offset = 0;
+  
+  ikm.set(dh1, offset); offset += dh1.length;
+  ikm.set(dh2, offset); offset += dh2.length;
+  ikm.set(dh3, offset); offset += dh3.length;
+  if (dh4.length > 0) {
+    ikm.set(dh4, offset); offset += dh4.length;
+  }
+  ikm.set(pqSecret, offset);
 
-  const ikm = new Uint8Array(mlkemSecret.length + x25519Secret.length);
-  ikm.set(mlkemSecret, 0);
-  ikm.set(x25519Secret, mlkemSecret.length);
-
+  // Derive Session Key
   const salt = computeSalt(senderCipherId, recipientCipherId);
-  const info = utf8ToBytes("VEIL-v1-session-key");
+  const info = utf8ToBytes("VEIL-PQXDH-v1");
   const sessionKey = hkdf(sha256, ikm, salt, info, 32);
+
+  // Hygiene
+  pqSecret.fill(0);
+  dh1.fill(0); dh2.fill(0); dh3.fill(0); 
+  if (dh4.length > 0) dh4.fill(0);
+  ikm.fill(0);
+  myIdPriv.fill(0);
+  mySpkPriv.fill(0);
+  myPqPriv.fill(0);
 
   return { sessionKey };
 }

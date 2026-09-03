@@ -35,4 +35,18 @@
 - [x] Authored `DEPLOYMENT.md` detailing Caddy, Nginx, and Tor Hidden Service deployments.
 - [x] Compiled `PROGRESS.md`.
 
-All systems complete.
+## Phase 6: Post-Quantum Extended Triple Diffie-Hellman (PQXDH) & Double Ratchet
+- [x] Implemented One-Time Prekeys (OPKs) and Signed Prekeys (SPKs).
+- [x] Implemented hybrid PQXDH combining ML-KEM-768 with classical X3DH.
+- [x] Implemented Double Ratchet (symmetric KDF chain + Diffie-Hellman ratchet) with out-of-order skipped message keys.
+- [x] Implemented ratchet session serialization and persistence in IndexedDB.
+
+## Phase 7: Sealed Sender & Native Hardening
+- [x] Implemented Sealed Sender envelope encryption and delivery tokens to blind sender metadata from the relay.
+- [x] Implemented server-side Ed25519 signing key and short-lived sender certificates.
+- [x] Integrated SQLite database for prekey bundle storage and replenishment.
+- [x] Capacitor Android integration with biometric unlock, FLAG_SECURE privacy screen, and native clipboard.
+- [x] Verified complete crypto test suite across Vitest, Node test runner, and production Vite build.
+
+All systems operational and verified.
+

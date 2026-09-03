@@ -1,39 +1,45 @@
 import { argon2id } from '@noble/hashes/argon2.js';
 import { utf8ToBytes, bytesToBase64, base64ToBytes } from './utils.js';
+import { SecureStoragePlugin } from 'capacitor-secure-storage-plugin';
 
-// IndexedDB helpers
-function getDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("veil_vault", 1);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains("keys")) {
-        db.createObjectStore("keys");
-      }
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror = (e) => reject(e.target.error);
-  });
+const memoryFallback = new Map();
+
+function getStorage() {
+  if (typeof localStorage !== 'undefined') {
+    return localStorage;
+  }
+  return {
+    getItem: (k) => memoryFallback.get(k) ?? null,
+    setItem: (k, v) => memoryFallback.set(k, v),
+    removeItem: (k) => memoryFallback.delete(k)
+  };
 }
 
 async function setStore(key, value) {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("keys", "readwrite");
-    tx.objectStore("keys").put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = (e) => reject(e.target.error);
-  });
+  if (typeof window !== 'undefined' && window.Capacitor?.isNative) {
+    try {
+      await SecureStoragePlugin.set({ key, value: JSON.stringify(value) });
+    } catch (e) {
+      console.error("SecureStorage set error:", e);
+      throw e;
+    }
+  } else {
+    getStorage().setItem(`veil_${key}`, JSON.stringify(value));
+  }
 }
 
 async function getStore(key) {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("keys", "readonly");
-    const req = tx.objectStore("keys").get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = (e) => reject(e.target.error);
-  });
+  if (typeof window !== 'undefined' && window.Capacitor?.isNative) {
+    try {
+      const { value } = await SecureStoragePlugin.get({ key });
+      return JSON.parse(value);
+    } catch (e) {
+      return null;
+    }
+  } else {
+    const val = getStorage().getItem(`veil_${key}`);
+    return val ? JSON.parse(val) : null;
+  }
 }
 
 export async function wrapAndStoreKeys(passphraseStr, identityKeyBundle) {
@@ -114,4 +120,12 @@ export async function hasVault() {
   } catch (e) {
     return false;
   }
+}
+
+export async function saveRatchetState(contactId, stateStr) {
+  await setStore(`ratchet_${contactId}`, stateStr);
+}
+
+export async function getRatchetState(contactId) {
+  return await getStore(`ratchet_${contactId}`);
 }

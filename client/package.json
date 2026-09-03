@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node test/crypto.test.js && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "node test/crypto.test.js"
   },
   "dependencies": {
     "@capacitor-community/privacy-screen": "^8.0.0",
@@ -16,10 +16,12 @@
     "@capacitor/clipboard": "^8.0.1",
     "@capacitor/core": "^8.5.0",
     "@capacitor/push-notifications": "^8.1.2",
+    "@capgo/capacitor-native-biometric": "^8.6.7",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@noble/post-quantum": "^0.7.1",
     "@tailwindcss/vite": "^4.3.3",
+    "capacitor-secure-storage-plugin": "^0.13.0",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^1.35.0",
     "qrcode.react": "^4.2.0",

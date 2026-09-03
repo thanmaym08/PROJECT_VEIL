@@ -7,5 +7,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
     cssMinify: false
+  },
+  test: {
+    include: ['tests/**/*.test.js']
   }
 })

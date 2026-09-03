@@ -32,6 +32,23 @@ export default function Onboarding({ onComplete }) {
     
     const bundle = { cipherId, nickname, ...keys };
     await wrapAndStoreKeys(passphrase, bundle);
+    
+    if (window.Capacitor?.isNative) {
+      try {
+        const { NativeBiometric } = await import('@capgo/capacitor-native-biometric');
+        const res = await NativeBiometric.isAvailable();
+        if (res.isAvailable) {
+          await NativeBiometric.setCredentials({
+            server: "veil.system",
+            username: "master",
+            password: passphrase
+          });
+        }
+      } catch (e) {
+        console.warn("Could not save biometric credentials:", e);
+      }
+    }
+    
     onComplete(bundle);
   };
 

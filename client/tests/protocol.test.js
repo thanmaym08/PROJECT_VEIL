@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import "fake-indexeddb/auto";
 import { generateCipherId, generateLongTermKeys } from '../src/crypto/identity.js';
+import { generatePreKeyBundle } from '../src/crypto/prekeys.js';
 import { computeInitiatorSession, computeReceiverSession } from '../src/crypto/handshake.js';
 import { encryptMessage, decryptMessage, ReplayWindow } from '../src/crypto/cipher.js';
 import { computeSafetyNumber } from '../src/crypto/safetyNumber.js';
@@ -17,12 +18,37 @@ describe('Project VEIL Protocol Tests', () => {
       const aliceKeys = generateLongTermKeys();
       const bobKeys = generateLongTermKeys();
 
+      // Bob generates prekeys
+      const bobEdPriv = base64ToBytes(bobKeys.ed25519.secretKeyB64);
+      const bobPreKeys = generatePreKeyBundle(bobEdPriv);
+      const bobBundle = {
+        identity: {
+          identityMlkemPub: bobKeys.mlkem.publicKeyB64,
+          identityX25519Pub: bobKeys.x25519.publicKeyB64,
+          identityEd25519Pub: bobKeys.ed25519.publicKeyB64
+        },
+        signedPreKey: bobPreKeys.publicBundle.signedPreKey,
+        signedPqPreKey: bobPreKeys.publicBundle.signedPqPreKey,
+        oneTimePreKey: bobPreKeys.publicBundle.oneTimePreKeys[0]
+      };
+
       // Handshake
-      const { sessionKey: aliceSessionKey, kemCiphertextB64, ephemeralX25519PubB64 } = 
-        computeInitiatorSession(bobKeys.mlkem.publicKeyB64, bobKeys.x25519.publicKeyB64, aliceId, bobId);
+      const { sessionKey: aliceSessionKey, kemCiphertextB64, ephemeralX25519PubB64, opkId } = 
+        computeInitiatorSession(bobBundle, aliceKeys.x25519.secretKeyB64, aliceId, bobId);
 
       const { sessionKey: bobSessionKey } = 
-        computeReceiverSession(kemCiphertextB64, ephemeralX25519PubB64, bobKeys.mlkem.secretKeyB64, bobKeys.x25519.secretKeyB64, aliceId, bobId);
+        computeReceiverSession(
+          ephemeralX25519PubB64,
+          kemCiphertextB64,
+          aliceKeys.x25519.publicKeyB64,
+          opkId,
+          bobKeys.x25519.secretKeyB64,
+          bobPreKeys.privateMaterial.signedPreKey,
+          bobPreKeys.privateMaterial.signedPqPreKey,
+          bobPreKeys.privateMaterial.oneTimePreKeys[0].priv,
+          aliceId,
+          bobId
+        );
 
       expect(aliceSessionKey).toEqual(bobSessionKey);
 

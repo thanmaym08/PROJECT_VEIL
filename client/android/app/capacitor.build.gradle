@@ -12,6 +12,8 @@ dependencies {
     implementation project(':capacitor-community-privacy-screen')
     implementation project(':capacitor-clipboard')
     implementation project(':capacitor-push-notifications')
+    implementation project(':capgo-capacitor-native-biometric')
+    implementation project(':capacitor-secure-storage-plugin')
 
 }
 

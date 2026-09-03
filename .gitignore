@@ -13,3 +13,10 @@ client/android/.gradle
 *.apk
 client/android/app/google-services.json
 server/serviceAccountKey.json
+server/server_signing_key.json
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.exe
+

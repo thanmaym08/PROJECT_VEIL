@@ -42,12 +42,13 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     e.preventDefault();
     try {
       const data = JSON.parse(scannedData);
-      if (data.id && data.mlkemPub && data.x25519Pub && name) {
+      if (data.id && data.mlkemPub && data.x25519Pub && data.ed25519Pub && name) {
         onAdd({
           id: data.id,
           name,
           mlkemPub: data.mlkemPub,
           x25519Pub: data.x25519Pub,
+          ed25519Pub: data.ed25519Pub,
           verified: false
         });
       }
@@ -63,7 +64,6 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
       console.error("Clipboard write failed", e);
-      // Fallback for older browsers
       try {
         navigator.clipboard.writeText(myData);
         setCopied(true);
@@ -76,7 +76,8 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     id: myId,
     nickname: keys.nickname,
     mlkemPub: keys.mlkem.publicKeyB64,
-    x25519Pub: keys.x25519.publicKeyB64
+    x25519Pub: keys.x25519.publicKeyB64,
+    ed25519Pub: keys.ed25519.publicKeyB64
   });
 
   return (

@@ -11,6 +11,9 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "better-sqlite3": "^13.0.3",
     "firebase-admin": "^14.3.0",
     "ws": "^8.21.3"
   }

@@ -6,7 +6,7 @@ function getBucket(ip, type) {
   let bucket = rateLimits.get(key);
   
   if (!bucket) {
-    const config = type === 'conn' ? { capacity: 30, rate: 30 / 60000 } : { capacity: 100, rate: 100 / 60000 };
+    const config = type === 'conn' ? { capacity: 1000, rate: 1000 / 60000 } : { capacity: 2000, rate: 2000 / 60000 };
     bucket = { tokens: config.capacity, lastRefill: Date.now(), config };
     rateLimits.set(key, bucket);
   }
@@ -43,15 +43,6 @@ export function checkMessageRateLimit(ip) {
 }
 
 export function validateOrigin(origin) {
-  // Explicit allow-list for web dev and Capacitor native
-  const allowedOrigins = [
-    'http://localhost:5173',    // Vite dev server
-    'http://127.0.0.1:5173',
-    'http://localhost:4173',    // Vite preview server
-    'http://127.0.0.1:4173',
-    'https://localhost',        // Capacitor Android/iOS
-  ];
-  // null/undefined origin = native Capacitor app (no origin header)
-  if (!origin) return true;
-  return allowedOrigins.includes(origin);
+  // Allow all origins over tunnel & native capacitor
+  return true;
 }

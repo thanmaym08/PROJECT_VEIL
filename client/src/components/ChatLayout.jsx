@@ -110,8 +110,38 @@ export default function ChatLayout({ keys, myId }) {
     }
   };
 
+  const getWsUrl = () => {
+    try {
+      const saved = localStorage.getItem('veil_relay_url');
+      if (saved) return saved;
+    } catch {}
+
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const relayParam = params.get('relay');
+      if (relayParam) return relayParam;
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      return 'ws://10.136.97.31:8080';
+    }
+
+    if (typeof window !== 'undefined' && window.location) {
+      const { hostname, protocol, host } = window.location;
+      if (hostname.includes('trycloudflare.com')) {
+        return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws`;
+      }
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'ws://localhost:8080';
+      }
+      return `ws://${hostname}:8080`;
+    }
+
+    return 'ws://localhost:8080';
+  };
+
   const connectWs = async (urlOverride = null) => {
-    let wsUrl = urlOverride || 'wss://compiler-examples-grown-unlimited.trycloudflare.com';
+    let wsUrl = urlOverride || getWsUrl();
     const socket = new WebSocket(wsUrl);
     ws.current = socket;
 
@@ -171,7 +201,7 @@ export default function ChatLayout({ keys, myId }) {
       setWsStatus('disconnected');
       setTimeout(() => {
         if (ws.current === socket || !ws.current || ws.current.readyState === WebSocket.CLOSED) {
-          connectWs();
+          connectWs(urlOverride);
         }
       }, 3000);
     };

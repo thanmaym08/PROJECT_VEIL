@@ -264,7 +264,7 @@ export default function ChatLayout({ keys, myId }) {
   const getApiBaseUrl = () => {
     try {
       const saved = localStorage.getItem('veil_relay_url');
-      if (saved) {
+      if (saved && !saved.includes('10.136.97.31') && !saved.includes('10.0.2.2')) {
         return saved.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://').replace(/\/ws\/?$/, '');
       }
     } catch {}
@@ -346,7 +346,7 @@ export default function ChatLayout({ keys, myId }) {
   const getWsUrl = () => {
     try {
       const saved = localStorage.getItem('veil_relay_url');
-      if (saved) return saved;
+      if (saved && !saved.includes('10.136.97.31') && !saved.includes('10.0.2.2')) return saved;
     } catch {}
 
     if (typeof window !== 'undefined' && window.location?.search) {

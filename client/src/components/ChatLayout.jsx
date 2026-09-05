@@ -290,12 +290,13 @@ export default function ChatLayout({ keys, myId }) {
   const loadAttachment = async (att) => {
     if (!att || !att.id) return;
     setDecryptedMedia(prev => {
-      if (prev[att.id]) return prev;
-      return { ...prev, [att.id]: { loading: true } };
+      if (prev[att.id] && !prev[att.id].error && !prev[att.id].loading) return prev;
+      return { ...prev, [att.id]: { loading: true, error: null } };
     });
 
     try {
       const apiBase = getApiBaseUrl();
+      console.log(`[VEIL] Downloading attachment ${att.id} from ${apiBase}`);
       const ciphertextBuffer = await downloadEncryptedAttachment(apiBase, att.id);
       const decrypted = await decryptAttachment(ciphertextBuffer, att.key, att.iv, att.mimeType);
       setDecryptedMedia(prev => ({

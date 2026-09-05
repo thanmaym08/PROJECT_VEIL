@@ -24,6 +24,11 @@ export default defineConfig({
   build: {
     cssMinify: false
   },
+  preview: {
+    host: true,
+    port: 4173,
+    allowedHosts: true
+  },
   test: {
     include: ['tests/**/*.test.js']
   }

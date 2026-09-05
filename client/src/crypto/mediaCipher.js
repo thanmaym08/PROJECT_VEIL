@@ -72,15 +72,29 @@ export async function uploadEncryptedAttachment(apiBaseUrl, ciphertextBuffer) {
 }
 
 /**
- * Download encrypted binary ciphertext from relay server.
+ * Download encrypted binary ciphertext from relay server with automatic retry.
  */
-export async function downloadEncryptedAttachment(apiBaseUrl, attachmentId) {
+export async function downloadEncryptedAttachment(apiBaseUrl, attachmentId, retries = 3) {
   const url = (apiBaseUrl ? apiBaseUrl.replace(/\/+$/, '') : '') + `/api/attachment/${attachmentId}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Download failed with HTTP ${response.status} (expired or removed)`);
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return await response.arrayBuffer();
+      }
+      if (response.status === 404) {
+        throw new Error('Attachment not found or expired on server');
+      }
+      throw new Error(`Download HTTP ${response.status}`);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 600 * attempt));
+      }
+    }
   }
-  return await response.arrayBuffer();
+  throw lastErr;
 }
 
 /**

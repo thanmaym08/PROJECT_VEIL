@@ -41,11 +41,40 @@ if (!existsSync(ATTACHMENT_DIR)) {
 const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024; // 15 MB
 const ATTACHMENT_TTL = 86400000; // 24 hours
 
-// HTTP Server for Attachments & Health
+// MIME type mapping for static frontend serving
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm'
+};
+
+const STATIC_DIR = [
+  path.resolve('public'),
+  path.resolve('../client/dist'),
+  path.resolve('client/dist')
+].find(dir => existsSync(dir) && existsSync(path.join(dir, 'index.html')));
+
+if (STATIC_DIR) {
+  console.log('[STATIC] Serving frontend web assets from:', STATIC_DIR);
+}
+
+// HTTP Server for Attachments, Health & Web Frontend
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Content-Length');
+  res.setHeader('Access-Control-Allow-Headers', '*');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -126,19 +155,51 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, {
         'Content-Type': 'application/octet-stream',
         'Content-Length': stat.size,
-        'Cache-Control': 'private, max-age=3600'
+        'Cache-Control': 'private, max-age=3600',
+        'Access-Control-Allow-Origin': '*'
       });
       createReadStream(filePath).pipe(res);
     } catch (e) {
       if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(JSON.stringify({ error: 'Failed to read attachment' }));
       }
     }
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
+  // Serve static client frontend if available
+  if (STATIC_DIR && (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/')) {
+    let safePath = path.normalize(url.pathname).replace(/^(\.\.[\/\\])+/, '');
+    if (safePath === '/' || safePath === '\\') safePath = 'index.html';
+    let targetPath = path.join(STATIC_DIR, safePath);
+
+    if (existsSync(targetPath) && statSync(targetPath).isFile()) {
+      const ext = path.extname(targetPath).toLowerCase();
+      const mime = MIME_TYPES[ext] || 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+        'Access-Control-Allow-Origin': '*'
+      });
+      if (req.method === 'HEAD') return res.end();
+      return createReadStream(targetPath).pipe(res);
+    }
+
+    // SPA fallback: return index.html for application routes
+    const indexPath = path.join(STATIC_DIR, 'index.html');
+    if (existsSync(indexPath)) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Access-Control-Allow-Origin': '*'
+      });
+      if (req.method === 'HEAD') return res.end();
+      return createReadStream(indexPath).pipe(res);
+    }
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
   res.end(JSON.stringify({ error: 'Not Found' }));
 });
 

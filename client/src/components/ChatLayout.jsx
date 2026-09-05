@@ -11,6 +11,8 @@ import { encryptAttachment, uploadEncryptedAttachment, downloadEncryptedAttachme
 import { Capacitor } from '@capacitor/core';
 
 const EMOJI_LIST = ['👍', '❤️', '🔥', '😂', '😮', '👏'];
+const DEFAULT_CLOUD_HTTP = 'https://veil-relay.onrender.com';
+const DEFAULT_CLOUD_WS = 'wss://veil-relay.onrender.com';
 
 function SwipeableMessageRow({ children, onReply, disabled }) {
   const [offset, setOffset] = useState(0);
@@ -268,14 +270,21 @@ export default function ChatLayout({ keys, myId }) {
     } catch {}
 
     if (Capacitor.isNativePlatform()) {
-      return 'http://10.0.2.2:8080';
+      return DEFAULT_CLOUD_HTTP;
     }
 
     if (typeof window !== 'undefined' && window.location) {
-      return window.location.origin;
+      const { hostname, origin } = window.location;
+      if (hostname.includes('trycloudflare.com')) {
+        return origin;
+      }
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'http://localhost:8080';
+      }
+      return DEFAULT_CLOUD_HTTP;
     }
 
-    return 'http://localhost:8080';
+    return DEFAULT_CLOUD_HTTP;
   };
 
   const loadAttachment = async (att) => {
@@ -347,7 +356,7 @@ export default function ChatLayout({ keys, myId }) {
     }
 
     if (Capacitor.isNativePlatform()) {
-      return 'ws://10.0.2.2:8080';
+      return DEFAULT_CLOUD_WS;
     }
 
     if (typeof window !== 'undefined' && window.location) {
@@ -358,10 +367,10 @@ export default function ChatLayout({ keys, myId }) {
       if (hostname === 'localhost' || hostname === '127.0.0.1') {
         return 'ws://localhost:8080';
       }
-      return `ws://${hostname}:8080`;
+      return DEFAULT_CLOUD_WS;
     }
 
-    return 'ws://localhost:8080';
+    return DEFAULT_CLOUD_WS;
   };
 
   const connectWs = async (urlOverride = null) => {

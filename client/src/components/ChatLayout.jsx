@@ -12,6 +12,96 @@ import { Capacitor } from '@capacitor/core';
 
 const EMOJI_LIST = ['👍', '❤️', '🔥', '😂', '😮', '👏'];
 
+function SwipeableMessageRow({ children, onReply, disabled }) {
+  const [offset, setOffset] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const startPos = useRef({ x: 0, y: 0 });
+  const isLocked = useRef(false);
+  const isHorizontal = useRef(false);
+  const isDragging = useRef(false);
+
+  const handlePointerDown = (e) => {
+    if (disabled || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (e.target.closest('button') || e.target.closest('a') || e.target.closest('img')) return;
+    
+    startPos.current = { x: e.clientX, y: e.clientY };
+    isLocked.current = false;
+    isHorizontal.current = false;
+    isDragging.current = true;
+    setIsSwiping(true);
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDragging.current) return;
+    const diffX = e.clientX - startPos.current.x;
+    const diffY = e.clientY - startPos.current.y;
+
+    if (!isLocked.current) {
+      if (Math.abs(diffX) > 8 || Math.abs(diffY) > 8) {
+        isLocked.current = true;
+        isHorizontal.current = Math.abs(diffX) > Math.abs(diffY);
+      }
+    }
+
+    if (!isHorizontal.current) return;
+
+    if (diffX > 0) {
+      // Swiping to the right with rubber-band curve
+      const damped = diffX > 60 ? 60 + (diffX - 60) * 0.25 : diffX;
+      setOffset(Math.min(damped, 85));
+    } else {
+      setOffset(0);
+    }
+  };
+
+  const handlePointerEnd = () => {
+    if (!isDragging.current) return;
+    isDragging.current = false;
+    if (offset >= 45) {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        try { navigator.vibrate(25); } catch {}
+      }
+      onReply();
+    }
+    setIsSwiping(false);
+    setOffset(0);
+  };
+
+  return (
+    <div 
+      className="relative w-full overflow-visible select-none"
+      style={{ touchAction: 'pan-y' }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+    >
+      {/* Background Reply Arrow Icon */}
+      <div 
+        className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center justify-center pointer-events-none z-10 transition-all duration-100"
+        style={{
+          opacity: Math.min(offset / 35, 1),
+          transform: `scale(${Math.min(Math.max(offset / 45, 0.4), 1)}) translateY(-50%)`
+        }}
+      >
+        <div className={`p-2 rounded-full border transition-all ${offset >= 45 ? 'bg-arc-cyan text-stark-bg border-arc-cyan shadow-glow-cyan scale-110' : 'bg-stark-surface/90 border-arc-cyan/40 text-arc-cyan'}`}>
+          <CornerUpLeft size={16} />
+        </div>
+      </div>
+
+      {/* Message Bubble Container with Translation */}
+      <div
+        style={{
+          transform: `translateX(${offset}px)`,
+          transition: isSwiping ? 'none' : 'transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatLayout({ keys, myId }) {
   const [contacts, setContacts] = useState([]);
   const [activeContact, setActiveContact] = useState(null);
@@ -27,12 +117,27 @@ export default function ChatLayout({ keys, myId }) {
   const [decryptedMedia, setDecryptedMedia] = useState({}); // id -> { loading, objectUrl, error, fileName, fileSize, mimeType }
   const [lightboxImage, setLightboxImage] = useState(null);
   const fileInputRef = useRef(null);
+  const inputRef = useRef(null);
 
   // Emoji Reaction State
   const [activeReactionSeq, setActiveReactionSeq] = useState(null);
 
   // Message Quoting / Replying State
   const [replyingTo, setReplyingTo] = useState(null); // { seq, senderId, senderName, text, hasAttachment }
+
+  const startReply = (m) => {
+    setReplyingTo({
+      seq: m.seq,
+      senderId: m.fromMe ? myId : activeContact.id,
+      senderName: m.fromMe ? 'YOU' : activeContact.name,
+      fromMe: m.fromMe,
+      text: m.text,
+      hasAttachment: !!m.attachment
+    });
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 50);
+  };
 
   const [typingUsers, setTypingUsers] = useState({});
   const typingTimeouts = useRef({});
@@ -1076,69 +1181,65 @@ export default function ChatLayout({ keys, myId }) {
             onClick={() => { if (activeReactionSeq) setActiveReactionSeq(null); }}
           >
             {messages.map(m => (
-              <div 
+              <SwipeableMessageRow 
                 key={m.seq} 
-                id={`msg-${m.seq}`}
-                className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 transition-all duration-300 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
+                onReply={() => startReply(m)}
               >
-                {/* Floating Emoji Picker Popover */}
-                {activeReactionSeq === m.seq && (
-                  <div 
-                    className={`absolute z-30 -top-11 ${m.fromMe ? 'right-0' : 'left-0'} flex items-center gap-1.5 px-2.5 py-1.5 bg-stark-bg/95 backdrop-blur-md border border-arc-cyan/50 rounded-full shadow-glow-cyan animate-in fade-in zoom-in-95 duration-150`}
-                    onClick={e => e.stopPropagation()}
+                <div 
+                  id={`msg-${m.seq}`}
+                  className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 transition-all duration-300 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
+                >
+                  {/* Floating Emoji Picker Popover */}
+                  {activeReactionSeq === m.seq && (
+                    <div 
+                      className={`absolute z-30 -top-11 ${m.fromMe ? 'right-0' : 'left-0'} flex items-center gap-1.5 px-2.5 py-1.5 bg-stark-bg/95 backdrop-blur-md border border-arc-cyan/50 rounded-full shadow-glow-cyan animate-in fade-in zoom-in-95 duration-150`}
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {EMOJI_LIST.map(emoji => {
+                        const reacted = m.reactions?.[emoji]?.includes(myId);
+                        return (
+                          <button
+                            key={emoji}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleReaction(m.seq, emoji);
+                            }}
+                            className={`text-base md:text-lg hover:scale-125 transform transition-transform p-1 rounded-full ${reacted ? 'bg-arc-cyan/30 ring-1 ring-arc-cyan' : 'hover:bg-white/10'}`}
+                            title={reacted ? "Remove reaction" : "React"}
+                          >
+                            {emoji}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Reaction Trigger Button (Smile Icon) */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveReactionSeq(activeReactionSeq === m.seq ? null : m.seq);
+                    }}
+                    className={`absolute -top-3 ${m.fromMe ? 'left-2' : 'right-2'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${activeReactionSeq === m.seq ? '!opacity-100' : ''}`}
+                    title="Add reaction"
                   >
-                    {EMOJI_LIST.map(emoji => {
-                      const reacted = m.reactions?.[emoji]?.includes(myId);
-                      return (
-                        <button
-                          key={emoji}
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleToggleReaction(m.seq, emoji);
-                          }}
-                          className={`text-base md:text-lg hover:scale-125 transform transition-transform p-1 rounded-full ${reacted ? 'bg-arc-cyan/30 ring-1 ring-arc-cyan' : 'hover:bg-white/10'}`}
-                          title={reacted ? "Remove reaction" : "React"}
-                        >
-                          {emoji}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                    <Smile size={12} />
+                  </button>
 
-                {/* Reaction Trigger Button (Smile Icon) */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setActiveReactionSeq(activeReactionSeq === m.seq ? null : m.seq);
-                  }}
-                  className={`absolute -top-3 ${m.fromMe ? 'left-2' : 'right-2'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${activeReactionSeq === m.seq ? '!opacity-100' : ''}`}
-                  title="Add reaction"
-                >
-                  <Smile size={12} />
-                </button>
-
-                {/* Reply Trigger Button */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setReplyingTo({
-                      seq: m.seq,
-                      senderId: m.fromMe ? myId : activeContact.id,
-                      senderName: m.fromMe ? 'YOU' : activeContact.name,
-                      fromMe: m.fromMe,
-                      text: m.text,
-                      hasAttachment: !!m.attachment
-                    });
-                  }}
-                  className={`absolute -top-3 ${m.fromMe ? 'left-9' : 'right-9'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
-                  title="Reply to message"
-                >
-                  <CornerUpLeft size={12} />
-                </button>
+                  {/* Reply Trigger Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startReply(m);
+                    }}
+                    className={`absolute -top-3 ${m.fromMe ? 'left-9' : 'right-9'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    title="Reply to message"
+                  >
+                    <CornerUpLeft size={12} />
+                  </button>
 
                 {/* Quoted Message Citation */}
                 {m.replyTo && (
@@ -1298,7 +1399,8 @@ export default function ChatLayout({ keys, myId }) {
                   )}
                 </div>
               </div>
-            ))}
+            </SwipeableMessageRow>
+          ))}
             
             {/* Typing Indicator */}
             {typingUsers[activeContact.id] && (
@@ -1384,6 +1486,7 @@ export default function ChatLayout({ keys, myId }) {
                   {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Paperclip size={16} />}
                 </button>
                 <input 
+                  ref={inputRef}
                   value={inputText}
                   onChange={e => {
                     setInputText(e.target.value);

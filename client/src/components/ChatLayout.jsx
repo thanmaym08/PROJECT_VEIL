@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2 } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes } from '../crypto/utils';
+import { encryptAttachment, uploadEncryptedAttachment, downloadEncryptedAttachment, decryptAttachment, revokeAttachmentUrl } from '../crypto/mediaCipher';
 import { Capacitor } from '@capacitor/core';
 
 export default function ChatLayout({ keys, myId }) {
@@ -18,6 +19,13 @@ export default function ChatLayout({ keys, myId }) {
   const [showSafetyNumber, setShowSafetyNumber] = useState(false);
   const [inputText, setInputText] = useState('');
   
+  // Media & Attachment State
+  const [stagedAttachment, setStagedAttachment] = useState(null); // { file, name, size, isImage, previewUrl }
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [decryptedMedia, setDecryptedMedia] = useState({}); // id -> { loading, objectUrl, error, fileName, fileSize, mimeType }
+  const [lightboxImage, setLightboxImage] = useState(null);
+  const fileInputRef = useRef(null);
+
   const [typingUsers, setTypingUsers] = useState({});
   const typingTimeouts = useRef({});
   
@@ -34,10 +42,38 @@ export default function ChatLayout({ keys, myId }) {
   const serverIdentityPubRef = useRef(null);
   const mySenderCertRef = useRef(null);
 
+  // Mobile Resilience refs
+  const reconnectAttemptRef = useRef(0);
+  const pingIntervalRef = useRef(null);
+  const pingTimeoutRef = useRef(null);
+
   useEffect(() => {
     loadContacts();
     connectWs();
-    return () => { if (ws.current) ws.current.close(); };
+
+    const handleResume = () => {
+      if (!ws.current || ws.current.readyState === WebSocket.CLOSED || ws.current.readyState === WebSocket.CLOSING) {
+        console.log("[VEIL] Visibility/Online event triggered socket reconnect");
+        connectWs();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleResume();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleResume);
+
+    return () => { 
+      if (ws.current) ws.current.close();
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleResume);
+    };
   }, []);
 
   useEffect(() => {
@@ -110,6 +146,81 @@ export default function ChatLayout({ keys, myId }) {
     }
   };
 
+  const getApiBaseUrl = () => {
+    try {
+      const saved = localStorage.getItem('veil_relay_url');
+      if (saved) {
+        return saved.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://').replace(/\/ws\/?$/, '');
+      }
+    } catch {}
+
+    if (Capacitor.isNativePlatform()) {
+      return 'http://10.0.2.2:8080';
+    }
+
+    if (typeof window !== 'undefined' && window.location) {
+      return window.location.origin;
+    }
+
+    return 'http://localhost:8080';
+  };
+
+  const loadAttachment = async (att) => {
+    if (!att || !att.id) return;
+    setDecryptedMedia(prev => {
+      if (prev[att.id]) return prev;
+      return { ...prev, [att.id]: { loading: true } };
+    });
+
+    try {
+      const apiBase = getApiBaseUrl();
+      const ciphertextBuffer = await downloadEncryptedAttachment(apiBase, att.id);
+      const decrypted = await decryptAttachment(ciphertextBuffer, att.key, att.iv, att.mimeType);
+      setDecryptedMedia(prev => ({
+        ...prev,
+        [att.id]: {
+          loading: false,
+          objectUrl: decrypted.objectUrl,
+          fileName: att.fileName,
+          fileSize: att.fileSize,
+          mimeType: att.mimeType
+        }
+      }));
+    } catch (e) {
+      console.warn("[VEIL] Failed to decrypt attachment:", att.id, e.message);
+      setDecryptedMedia(prev => ({
+        ...prev,
+        [att.id]: {
+          loading: false,
+          error: e.message || 'Decryption failed'
+        }
+      }));
+    }
+  };
+
+  const handleFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      alert(`File size ${(file.size / (1024 * 1024)).toFixed(1)}MB exceeds maximum 15MB limit.`);
+      e.target.value = '';
+      return;
+    }
+
+    const isImage = file.type.startsWith('image/');
+    const previewUrl = isImage ? URL.createObjectURL(file) : null;
+    setStagedAttachment({
+      file,
+      name: file.name,
+      size: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      isImage,
+      previewUrl
+    });
+    e.target.value = '';
+  };
+
   const getWsUrl = () => {
     try {
       const saved = localStorage.getItem('veil_relay_url');
@@ -148,6 +259,22 @@ export default function ChatLayout({ keys, myId }) {
     socket.onopen = async () => {
       if (ws.current !== socket) return;
       setWsStatus('connected');
+      reconnectAttemptRef.current = 0; // reset backoff
+
+      // Heartbeat ping/pong (every 25s) with 10s watchdog timeout
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify({ type: 'ping' }));
+            if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+            pingTimeoutRef.current = setTimeout(() => {
+              console.warn("[VEIL] Heartbeat watchdog timeout (10s)! Reconnecting stale socket...");
+              socket.close();
+            }, 10000);
+          } catch {}
+        }
+      }, 25000);
 
       let fcmToken = null;
       if (Capacitor.isNativePlatform()) {
@@ -199,16 +326,28 @@ export default function ChatLayout({ keys, myId }) {
     socket.onclose = () => {
       if (ws.current !== socket) return;
       setWsStatus('disconnected');
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+
       if (!urlOverride && Capacitor.isNativePlatform() && wsUrl === 'ws://10.0.2.2:8080') {
         console.log('[VEIL] Emulator loopback failed, trying WiFi IP fallback...');
         setTimeout(() => connectWs('ws://10.136.97.31:8080'), 1000);
         return;
       }
+
+      // Exponential backoff with jitter: 1s, 2s, 4s, 8s, up to 15s max
+      const attempt = reconnectAttemptRef.current;
+      const baseDelay = Math.min(15000, Math.pow(1.8, attempt) * 1000);
+      const jitter = Math.random() * 500;
+      const delay = Math.round(baseDelay + jitter);
+      reconnectAttemptRef.current++;
+
+      console.log(`[VEIL] Socket closed. Reconnecting in ${delay}ms (attempt ${attempt + 1})...`);
       setTimeout(() => {
         if (ws.current === socket || !ws.current || ws.current.readyState === WebSocket.CLOSED) {
           connectWs(urlOverride);
         }
-      }, 3000);
+      }, delay);
     };
 
     socket.onerror = (e) => {
@@ -217,7 +356,15 @@ export default function ChatLayout({ keys, myId }) {
 
     socket.onmessage = async (e) => {
       if (ws.current !== socket) return;
+
+      // Clear ping watchdog upon any message reception
+      if (pingTimeoutRef.current) {
+        clearTimeout(pingTimeoutRef.current);
+        pingTimeoutRef.current = null;
+      }
+
       const data = JSON.parse(e.data);
+      if (data.type === 'pong') return;
       if (data.type === 'typing') {
         const from = data.from;
         setTypingUsers(prev => ({ ...prev, [from]: true }));
@@ -347,9 +494,14 @@ export default function ChatLayout({ keys, myId }) {
 
       let text = decrypted;
       let contactToken = null;
+      let attachment = null;
       try {
         const payload = JSON.parse(decrypted);
-        if (payload.text) text = payload.text;
+        if (payload.text !== undefined) text = payload.text;
+        if (payload.attachment) {
+          attachment = payload.attachment;
+          loadAttachment(payload.attachment);
+        }
         if (payload.deliveryToken) contactToken = payload.deliveryToken;
       } catch (e) {
         // legacy plaintext
@@ -369,6 +521,7 @@ export default function ChatLayout({ keys, myId }) {
         contactId: senderId,
         fromMe: false,
         text,
+        attachment,
         ts: msgData.ts,
         seq: msgData.seq,
         ttl: msgData.ttl || 0
@@ -399,8 +552,45 @@ export default function ChatLayout({ keys, myId }) {
   };
 
   const handleSend = async (e) => {
-    e.preventDefault();
-    if (!inputText.trim() || !activeContact) return;
+    if (e) e.preventDefault();
+    if ((!inputText.trim() && !stagedAttachment) || !activeContact) return;
+
+    let attachmentMetadata = null;
+    if (stagedAttachment) {
+      setUploadingAttachment(true);
+      try {
+        const encrypted = await encryptAttachment(stagedAttachment.file);
+        const apiBase = getApiBaseUrl();
+        const attachmentId = await uploadEncryptedAttachment(apiBase, encrypted.ciphertextBuffer);
+        attachmentMetadata = {
+          id: attachmentId,
+          key: encrypted.keyB64,
+          iv: encrypted.ivB64,
+          fileName: encrypted.fileName,
+          fileSize: encrypted.fileSize,
+          mimeType: encrypted.mimeType
+        };
+        // Cache decrypted blob locally so sender sees their own media instantly
+        if (stagedAttachment.previewUrl) {
+          setDecryptedMedia(prev => ({
+            ...prev,
+            [attachmentId]: {
+              loading: false,
+              objectUrl: stagedAttachment.previewUrl,
+              fileName: encrypted.fileName,
+              fileSize: encrypted.fileSize,
+              mimeType: encrypted.mimeType
+            }
+          }));
+        }
+      } catch (err) {
+        console.error("[VEIL] Attachment upload failed:", err);
+        alert("Attachment upload failed: " + err.message);
+        setUploadingAttachment(false);
+        return;
+      }
+      setUploadingAttachment(false);
+    }
 
     try {
       let ratchet = sessionKeys.current[activeContact.id];
@@ -467,6 +657,7 @@ export default function ChatLayout({ keys, myId }) {
       // Include delivery token in plaintext payload so contact can reply blindly
       const innerPayload = JSON.stringify({
          text: inputText,
+         attachment: attachmentMetadata || undefined,
          deliveryToken: keys.profile.deliveryTokenB64
       });
       
@@ -519,10 +710,20 @@ export default function ChatLayout({ keys, myId }) {
         await saveToOutbox(finalPayload);
       }
       
-      const msgObj = { contactId: activeContact.id, fromMe: true, text: inputText, ts, seq, status: 'sending', ttl };
+      const msgObj = { 
+        contactId: activeContact.id, 
+        fromMe: true, 
+        text: inputText, 
+        attachment: attachmentMetadata || undefined,
+        ts, 
+        seq, 
+        status: 'sending', 
+        ttl 
+      };
       await saveMessage(msgObj);
       setMessages(prev => [...prev, msgObj]);
       setInputText('');
+      setStagedAttachment(null);
     } catch (err) {
       alert("Encryption or Socket Error: " + err.message);
       console.error(err);
@@ -669,7 +870,88 @@ export default function ChatLayout({ keys, myId }) {
           <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative">
             {messages.map(m => (
               <div key={m.seq} className={`max-w-[85%] md:max-w-[80%] p-3 md:p-4 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}>
-                <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : 'text-gray-200'} break-words`}>{m.text}</div>
+                {/* Encrypted Attachment Rendering */}
+                {m.attachment && (
+                  <div className="mb-2.5">
+                    {(() => {
+                      const media = decryptedMedia[m.attachment.id];
+                      if (!media || media.loading) {
+                        return (
+                          <div className="p-3 bg-stark-surface border border-arc-cyan/30 rounded flex items-center gap-3 animate-pulse">
+                            <Loader2 size={16} className="text-arc-cyan animate-spin" />
+                            <div className="font-mono text-xs text-arc-cyan/80">
+                              [DECRYPTING QUANTUM CIPHERTEXT...]
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (media.error) {
+                        return (
+                          <div className="p-2.5 bg-stark-crimson/10 border border-stark-crimson/40 rounded text-stark-crimson font-mono text-xs flex items-center justify-between">
+                            <span className="truncate">FAILED TO DECRYPT ({media.error})</span>
+                            <button onClick={() => loadAttachment(m.attachment)} className="underline ml-2 uppercase text-[10px]">RETRY</button>
+                          </div>
+                        );
+                      }
+                      const isImg = media.mimeType?.startsWith('image/');
+                      if (isImg) {
+                        return (
+                          <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
+                            <img 
+                              src={media.objectUrl} 
+                              alt={media.fileName}
+                              className="w-full max-h-64 object-cover cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
+                              onClick={() => setLightboxImage(media.objectUrl)}
+                            />
+                            <div className="p-1.5 bg-stark-bg/90 backdrop-blur-md flex justify-between items-center text-[10px] font-mono text-arc-cyan border-t border-arc-cyan/20">
+                              <span className="truncate max-w-[150px]">{media.fileName}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="opacity-60">{(media.fileSize / 1024).toFixed(1)} KB</span>
+                                <button 
+                                  onClick={() => setLightboxImage(media.objectUrl)}
+                                  className="p-1 hover:text-white transition-colors"
+                                  title="Expand"
+                                >
+                                  <Maximize2 size={12} />
+                                </button>
+                                <a 
+                                  href={media.objectUrl} 
+                                  download={media.fileName}
+                                  className="p-1 hover:text-white transition-colors"
+                                  title="Save locally"
+                                >
+                                  <Download size={12} />
+                                </a>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+                      // Generic Document / Media Card
+                      return (
+                        <div className="p-2.5 bg-stark-surface border border-arc-cyan/30 rounded flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 truncate">
+                            <FileText size={20} className="text-arc-cyan shrink-0" />
+                            <div className="truncate">
+                              <div className="font-mono text-xs text-white truncate">{media.fileName}</div>
+                              <div className="font-mono text-[10px] text-arc-cyan/60">{(media.fileSize / 1024).toFixed(1)} KB • AES-256-GCM</div>
+                            </div>
+                          </div>
+                          <a 
+                            href={media.objectUrl} 
+                            download={media.fileName}
+                            className="p-1.5 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/40 text-arc-cyan hover:shadow-glow-cyan rounded transition-all shrink-0"
+                            title="Download decrypted file"
+                          >
+                            <Download size={14} />
+                          </a>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {m.text && <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : 'text-gray-200'} break-words`}>{m.text}</div>}
                 <div className="text-[9px] md:text-[10px] font-mono text-arc-cyan/50 mt-2 flex justify-end items-center gap-2">
                   {m.ttl > 0 && m.status === 'read' && m.readAt && (
                     <span className="text-stark-gold font-bold flex items-center gap-1">
@@ -709,12 +991,48 @@ export default function ChatLayout({ keys, myId }) {
 
           {/* Input Dock */}
           <div className="p-2 md:p-4 bg-stark-bg/80 backdrop-blur-xl border-t border-arc-cyan/20">
+            <input 
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              className="hidden"
+              accept="image/*,video/*,audio/*,application/pdf,text/*"
+            />
             <form onSubmit={handleSend} className="flex flex-col gap-2 relative">
+              {/* Staged Attachment Banner */}
+              {stagedAttachment && (
+                <div className="flex items-center justify-between p-2 bg-arc-cyan/10 border border-arc-cyan/40 text-xs font-mono text-arc-cyan">
+                  <div className="flex items-center gap-2 truncate">
+                    {stagedAttachment.isImage ? <Image size={14} /> : <FileText size={14} />}
+                    <span className="truncate max-w-[200px]">{stagedAttachment.name}</span>
+                    <span className="text-[10px] text-arc-cyan/60">({(stagedAttachment.size / 1024).toFixed(1)} KB)</span>
+                    <span className="text-[9px] bg-arc-cyan/20 text-arc-cyan px-1.5 py-0.5 border border-arc-cyan/40 font-hud tracking-wider uppercase">AES-256-GCM READY</span>
+                  </div>
+                  <button 
+                    type="button" 
+                    onClick={() => setStagedAttachment(null)}
+                    className="text-stark-crimson hover:text-white p-1 transition-colors"
+                    title="Remove Attachment"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+
               <div className="flex justify-between px-2 text-[9px] md:text-[10px] font-mono text-arc-cyan/50 uppercase">
                 <span>TX_CONSOLE</span>
-                <span>{(inputText.length / 1024).toFixed(2)} KB / 8.00 KB</span>
+                <span>{((inputText.length + (stagedAttachment ? stagedAttachment.size : 0)) / 1024).toFixed(2)} KB / 15.00 MB MAX</span>
               </div>
               <div className="flex gap-2">
+                <button 
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingAttachment}
+                  className="bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 disabled:opacity-50 p-2 md:p-3 text-arc-cyan flex items-center justify-center transition-all duration-200 hover:shadow-glow-cyan"
+                  title="Encrypt & Attach Media"
+                >
+                  {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Paperclip size={16} />}
+                </button>
                 <input 
                   value={inputText}
                   onChange={e => {
@@ -728,11 +1046,15 @@ export default function ChatLayout({ keys, myId }) {
                     }
                   }}
                   className="flex-1 bg-stark-surface border border-arc-cyan/30 p-2 md:p-3 font-mono text-xs text-arc-cyan placeholder:text-arc-cyan/30 focus:outline-none focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50 transition-all"
-                  placeholder="> Enter transmission..."
+                  placeholder={uploadingAttachment ? "Encrypting & uploading attachment..." : "> Enter transmission or attach file..."}
                   maxLength={8000}
                 />
-                <button type="submit" disabled={!inputText.trim()} className="group bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan disabled:opacity-50 p-2 md:p-3 text-arc-cyan flex items-center justify-center w-12 md:w-14 transition-all duration-200 hover:shadow-glow-cyan">
-                  <Send size={16} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
+                <button 
+                  type="submit" 
+                  disabled={(!inputText.trim() && !stagedAttachment) || uploadingAttachment} 
+                  className="group bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan disabled:opacity-50 p-2 md:p-3 text-arc-cyan flex items-center justify-center w-12 md:w-14 transition-all duration-200 hover:shadow-glow-cyan"
+                >
+                  {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Send size={16} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />}
                 </button>
               </div>
             </form>
@@ -772,6 +1094,37 @@ export default function ChatLayout({ keys, myId }) {
             await loadContacts();
           }}
         />
+      )}
+
+      {/* Decrypted Media Lightbox Modal */}
+      {lightboxImage && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div className="relative max-w-4xl max-h-[90vh] border border-arc-cyan/40 p-2 bg-stark-surface shadow-glow-cyan flex flex-col items-end gap-2" onClick={e => e.stopPropagation()}>
+            <div className="w-full flex justify-between items-center text-xs font-hud tracking-widest text-arc-cyan border-b border-arc-cyan/20 pb-2">
+              <span>PROJECT VEIL // DECRYPTED TRANSMISSION</span>
+              <button 
+                onClick={() => setLightboxImage(null)}
+                className="text-arc-cyan hover:text-stark-crimson p-1 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <img src={lightboxImage} alt="Decrypted transmission" className="max-h-[75vh] max-w-full object-contain rounded" />
+            <div className="w-full flex justify-between items-center text-[10px] font-mono text-arc-cyan/60 pt-2">
+              <span>ORIGIN: IN-MEMORY RAM DECRYPTION</span>
+              <a 
+                href={lightboxImage} 
+                download="veil_transmission.jpg"
+                className="flex items-center gap-1 text-arc-cyan hover:underline"
+              >
+                <Download size={12} /> SAVE TO DISK
+              </a>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

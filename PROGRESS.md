@@ -55,5 +55,14 @@
 - [x] Built and synchronized production assets to Capacitor Android project.
 - [x] Successfully verified live, real-time PQXDH + Double Ratchet messaging between native Android emulator and desktop browser.
 
+## Phase 9: Mobile Resilience & Zero-Knowledge Encrypted Media
+- [x] Implemented client-side AES-256-GCM media encryption engine (`mediaCipher.js`) with 15MB file size support.
+- [x] Mounted HTTP attachment subsystem on port 8080 (`POST /api/attachment`, `GET /api/attachment/:id`) with 24-hour auto-shredding TTL.
+- [x] Added attachment picker, staged upload preview, and decrypted media rendering in chat with cyberpunk lightbox modal.
+- [x] Implemented mobile resilience with 25s ping/pong keep-alive heartbeat and 10s watchdog timeout.
+- [x] Implemented exponential backoff auto-reconnect with jitter (1s - 15s) and app sleep-wake resume listeners.
+- [x] Synchronized production assets to Capacitor Android project.
+- [x] Verified zero-knowledge encryption, upload, download, and tamper-detection via automated test suite.
+
 All systems operational and verified.
 

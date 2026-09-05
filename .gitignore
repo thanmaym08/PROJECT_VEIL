@@ -19,4 +19,5 @@ server/server_signing_key.json
 *.sqlite3
 *.db-journal
 *.exe
+server/attachments/
 

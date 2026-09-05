@@ -16,7 +16,10 @@ const IDENTITY_TTL = 259200000; // 72 hours
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, createWriteStream, createReadStream, statSync, unlink, readdir, stat } from 'fs';
+import http from 'http';
+import path from 'path';
+import { randomUUID } from 'crypto';
 
 let firebaseEnabled = false;
 try {
@@ -30,8 +33,117 @@ try {
   console.warn("Firebase Admin failed to init, skipping push capabilities. Error:", e.message);
 }
 
+// Attachment Storage Configuration (24-hour ephemeral retention)
+const ATTACHMENT_DIR = path.resolve('attachments');
+if (!existsSync(ATTACHMENT_DIR)) {
+  mkdirSync(ATTACHMENT_DIR, { recursive: true });
+}
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024; // 15 MB
+const ATTACHMENT_TTL = 86400000; // 24 hours
+
+// HTTP Server for Attachments & Health
+const server = http.createServer((req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Content-Length');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  // Health check
+  if (url.pathname === '/health' || url.pathname === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
+    return;
+  }
+
+  // Upload Encrypted Attachment: POST /api/attachment
+  if (req.method === 'POST' && url.pathname === '/api/attachment') {
+    const attachmentId = randomUUID();
+    const filePath = path.join(ATTACHMENT_DIR, `${attachmentId}.enc`);
+    const fileStream = createWriteStream(filePath);
+    let totalSize = 0;
+    let aborted = false;
+
+    req.on('data', (chunk) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_ATTACHMENT_SIZE) {
+        aborted = true;
+        fileStream.destroy();
+        unlink(filePath, () => {});
+        if (!res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Attachment exceeds maximum limit of 15MB' }));
+        }
+        req.destroy();
+      } else {
+        fileStream.write(chunk);
+      }
+    });
+
+    req.on('end', () => {
+      if (aborted) return;
+      fileStream.end(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ attachmentId, size: totalSize }));
+      });
+    });
+
+    req.on('error', (err) => {
+      fileStream.destroy();
+      unlink(filePath, () => {});
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Upload streaming failed' }));
+      }
+    });
+    return;
+  }
+
+  // Download Encrypted Attachment: GET /api/attachment/:id
+  if (req.method === 'GET' && url.pathname.startsWith('/api/attachment/')) {
+    const id = url.pathname.split('/')[3];
+    if (!id || !/^[a-zA-Z0-9-]+$/.test(id)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid attachment ID format' }));
+      return;
+    }
+
+    const filePath = path.join(ATTACHMENT_DIR, `${id}.enc`);
+    if (!existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Attachment not found or expired' }));
+      return;
+    }
+
+    try {
+      const stat = statSync(filePath);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Cache-Control': 'private, max-age=3600'
+      });
+      createReadStream(filePath).pipe(res);
+    } catch (e) {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to read attachment' }));
+      }
+    }
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not Found' }));
+});
+
 const wss = new WebSocketServer({ 
-  port: 8080,
+  server,
   maxPayload: MAX_PAYLOAD_SIZE,
   verifyClient: (info, cb) => {
     const ip = info.req.socket.remoteAddress;
@@ -53,6 +165,17 @@ const wss = new WebSocketServer({
     cb(true);
   }
 });
+
+// Periodic WebSocket heartbeat to weed out dead connections
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
 
 // State Structures (Strictly In-Memory)
 const identities = new Map();
@@ -98,6 +221,10 @@ wss.on('connection', (ws, req) => {
     }
 
     switch (data.type) {
+      case 'ping': {
+        ws.send(JSON.stringify({ type: 'pong' }));
+        break;
+      }
       case 'register': {
         const { cipherId, mlkemPub, x25519Pub, ed25519Pub, deliveryToken, fcmToken, bundle } = data;
         if (!cipherId || !mlkemPub || !x25519Pub) return;
@@ -354,6 +481,21 @@ setInterval(() => {
       offlineQueues.set(cipherId, activeQueue);
     }
   }
+
+  // Clean expired encrypted attachments (older than 24h TTL)
+  readdir(ATTACHMENT_DIR, (err, files) => {
+    if (err || !files) return;
+    files.forEach((file) => {
+      const p = path.join(ATTACHMENT_DIR, file);
+      stat(p, (err, stats) => {
+        if (!err && now - stats.mtimeMs > ATTACHMENT_TTL) {
+          unlink(p, () => {});
+        }
+      });
+    });
+  });
 }, 60000);
 
-console.log('VEIL Relay Server running on port 8080');
+server.listen(8080, () => {
+  console.log('VEIL Relay & Attachment Server running on port 8080 (HTTP + WSS)');
+});

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
@@ -30,6 +30,9 @@ export default function ChatLayout({ keys, myId }) {
 
   // Emoji Reaction State
   const [activeReactionSeq, setActiveReactionSeq] = useState(null);
+
+  // Message Quoting / Replying State
+  const [replyingTo, setReplyingTo] = useState(null); // { seq, senderId, senderName, text, hasAttachment }
 
   const [typingUsers, setTypingUsers] = useState({});
   const typingTimeouts = useRef({});
@@ -500,6 +503,7 @@ export default function ChatLayout({ keys, myId }) {
       let text = decrypted;
       let contactToken = null;
       let attachment = null;
+      let replyTo = null;
       try {
         const payload = JSON.parse(decrypted);
         if (payload.action === 'reaction') {
@@ -558,6 +562,7 @@ export default function ChatLayout({ keys, myId }) {
           loadAttachment(payload.attachment);
         }
         if (payload.deliveryToken) contactToken = payload.deliveryToken;
+        if (payload.replyTo) replyTo = payload.replyTo;
       } catch (e) {
         // legacy plaintext
       }
@@ -577,6 +582,7 @@ export default function ChatLayout({ keys, myId }) {
         fromMe: false,
         text,
         attachment,
+        replyTo: replyTo || undefined,
         reactions: {},
         ts: msgData.ts,
         seq: msgData.seq,
@@ -710,11 +716,20 @@ export default function ChatLayout({ keys, myId }) {
       
       const ttl = vanishModes[activeContact.id] || 0;
       
-      // Include delivery token in plaintext payload so contact can reply blindly
+      const replyPayload = replyingTo ? {
+        seq: replyingTo.seq,
+        senderId: replyingTo.senderId,
+        senderName: replyingTo.senderName,
+        text: (replyingTo.text || '').slice(0, 200),
+        hasAttachment: !!replyingTo.hasAttachment
+      } : undefined;
+
+      // Include delivery token and reply context in plaintext payload
       const innerPayload = JSON.stringify({
          text: inputText,
          attachment: attachmentMetadata || undefined,
-         deliveryToken: keys.profile.deliveryTokenB64
+         deliveryToken: keys.profile.deliveryTokenB64,
+         replyTo: replyPayload
       });
       
       const { header, iv, ct } = await ratchet.encryptMessage(innerPayload);
@@ -771,6 +786,7 @@ export default function ChatLayout({ keys, myId }) {
         fromMe: true, 
         text: inputText, 
         attachment: attachmentMetadata || undefined,
+        replyTo: replyPayload,
         reactions: {},
         ts, 
         seq, 
@@ -781,6 +797,7 @@ export default function ChatLayout({ keys, myId }) {
       setMessages(prev => [...prev, msgObj]);
       setInputText('');
       setStagedAttachment(null);
+      setReplyingTo(null);
     } catch (err) {
       alert("Encryption or Socket Error: " + err.message);
       console.error(err);
@@ -1061,7 +1078,8 @@ export default function ChatLayout({ keys, myId }) {
             {messages.map(m => (
               <div 
                 key={m.seq} 
-                className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
+                id={`msg-${m.seq}`}
+                className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 transition-all duration-300 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
               >
                 {/* Floating Emoji Picker Popover */}
                 {activeReactionSeq === m.seq && (
@@ -1101,6 +1119,51 @@ export default function ChatLayout({ keys, myId }) {
                 >
                   <Smile size={12} />
                 </button>
+
+                {/* Reply Trigger Button */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setReplyingTo({
+                      seq: m.seq,
+                      senderId: m.fromMe ? myId : activeContact.id,
+                      senderName: m.fromMe ? 'YOU' : activeContact.name,
+                      fromMe: m.fromMe,
+                      text: m.text,
+                      hasAttachment: !!m.attachment
+                    });
+                  }}
+                  className={`absolute -top-3 ${m.fromMe ? 'left-9' : 'right-9'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                  title="Reply to message"
+                >
+                  <CornerUpLeft size={12} />
+                </button>
+
+                {/* Quoted Message Citation */}
+                {m.replyTo && (
+                  <div 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const el = document.getElementById(`msg-${m.replyTo.seq}`);
+                      if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        el.classList.add('ring-2', 'ring-arc-cyan');
+                        setTimeout(() => el.classList.remove('ring-2', 'ring-arc-cyan'), 1500);
+                      }
+                    }}
+                    className="mb-2 p-2 bg-black/40 border-l-2 border-arc-cyan/80 rounded-r text-xs font-mono cursor-pointer hover:bg-black/60 transition-colors"
+                    title="Click to view original message"
+                  >
+                    <div className="text-[10px] text-arc-cyan font-bold tracking-wider uppercase flex items-center gap-1">
+                      <CornerUpLeft size={10} />
+                      <span>{m.replyTo.senderName || 'CONTACT'}</span>
+                    </div>
+                    <div className="text-gray-300 text-xs truncate max-w-full mt-0.5">
+                      {m.replyTo.hasAttachment ? '📎 ' : ''}{m.replyTo.text || '[Encrypted Media]'}
+                    </div>
+                  </div>
+                )}
 
                 {/* Encrypted Attachment Rendering */}
                 {m.attachment && (
@@ -1261,6 +1324,31 @@ export default function ChatLayout({ keys, myId }) {
               accept="image/*,video/*,audio/*,application/pdf,text/*"
             />
             <form onSubmit={handleSend} className="flex flex-col gap-2 relative">
+              {/* Replying Context Banner */}
+              {replyingTo && (
+                <div className="flex items-center justify-between p-2 bg-stark-card border-l-2 border-arc-cyan border-y border-r border-arc-cyan/30 text-xs font-mono shadow-glow-cyan animate-in fade-in slide-in-from-bottom-2 duration-150">
+                  <div className="flex items-center gap-2 truncate">
+                    <CornerUpLeft size={14} className="text-arc-cyan shrink-0" />
+                    <div className="truncate">
+                      <div className="text-[10px] text-arc-cyan font-bold tracking-wider uppercase">
+                        REPLYING TO {replyingTo.senderName || (replyingTo.fromMe ? 'YOURSELF' : 'CONTACT')}
+                      </div>
+                      <div className="text-gray-300 text-xs truncate max-w-[260px] md:max-w-md">
+                        {replyingTo.hasAttachment ? '📎 [ATTACHMENT] ' : ''}{replyingTo.text || 'Encrypted Media'}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setReplyingTo(null)}
+                    className="text-arc-cyan/60 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                    title="Cancel Reply"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+
               {/* Staged Attachment Banner */}
               {stagedAttachment && (
                 <div className="flex items-center justify-between p-2 bg-arc-cyan/10 border border-arc-cyan/40 text-xs font-mono text-arc-cyan">

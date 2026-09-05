@@ -496,6 +496,7 @@ setInterval(() => {
   });
 }, 60000);
 
-server.listen(8080, () => {
-  console.log('VEIL Relay & Attachment Server running on port 8080 (HTTP + WSS)');
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`VEIL Relay & Attachment Server running on port ${PORT} (HTTP + WSS)`);
 });

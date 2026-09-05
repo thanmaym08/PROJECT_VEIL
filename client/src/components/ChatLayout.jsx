@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2 } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
@@ -9,6 +9,8 @@ import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes } from '../crypto/utils';
 import { encryptAttachment, uploadEncryptedAttachment, downloadEncryptedAttachment, decryptAttachment, revokeAttachmentUrl } from '../crypto/mediaCipher';
 import { Capacitor } from '@capacitor/core';
+
+const EMOJI_LIST = ['👍', '❤️', '🔥', '😂', '😮', '👏'];
 
 export default function ChatLayout({ keys, myId }) {
   const [contacts, setContacts] = useState([]);
@@ -25,6 +27,9 @@ export default function ChatLayout({ keys, myId }) {
   const [decryptedMedia, setDecryptedMedia] = useState({}); // id -> { loading, objectUrl, error, fileName, fileSize, mimeType }
   const [lightboxImage, setLightboxImage] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Emoji Reaction State
+  const [activeReactionSeq, setActiveReactionSeq] = useState(null);
 
   const [typingUsers, setTypingUsers] = useState({});
   const typingTimeouts = useRef({});
@@ -497,6 +502,56 @@ export default function ChatLayout({ keys, myId }) {
       let attachment = null;
       try {
         const payload = JSON.parse(decrypted);
+        if (payload.action === 'reaction') {
+          const { targetSeq, emoji } = payload;
+          if (targetSeq && emoji) {
+            setMessages(prev => prev.map(m => {
+              if (m.seq === targetSeq) {
+                const curReactions = { ...(m.reactions || {}) };
+                const curUsers = curReactions[emoji] || [];
+                if (curUsers.includes(senderId)) {
+                  curReactions[emoji] = curUsers.filter(id => id !== senderId);
+                  if (curReactions[emoji].length === 0) {
+                    delete curReactions[emoji];
+                  }
+                } else {
+                  curReactions[emoji] = [...curUsers, senderId];
+                }
+                updateMessageReactions(senderId, targetSeq, curReactions).catch(console.error);
+                return { ...m, reactions: curReactions };
+              }
+              return m;
+            }));
+
+            if (!activeContactRef.current || activeContactRef.current.id !== senderId) {
+              getMessages(senderId).then(allMsgs => {
+                const target = allMsgs.find(m => m.seq === targetSeq);
+                if (target) {
+                  const curReactions = { ...(target.reactions || {}) };
+                  const curUsers = curReactions[emoji] || [];
+                  if (curUsers.includes(senderId)) {
+                    curReactions[emoji] = curUsers.filter(id => id !== senderId);
+                    if (curReactions[emoji].length === 0) delete curReactions[emoji];
+                  } else {
+                    curReactions[emoji] = [...curUsers, senderId];
+                  }
+                  updateMessageReactions(senderId, targetSeq, curReactions).catch(console.error);
+                }
+              });
+            }
+          }
+
+          if (payload.deliveryToken) contactToken = payload.deliveryToken;
+          if (contactToken && contact.deliveryToken !== contactToken) {
+            const updated = { ...contact, deliveryToken: contactToken };
+            await saveContact(updated);
+            setContacts(prev => prev.map(c => c.id === contact.id ? updated : c));
+            const idx = contactsRef.current.findIndex(c => c.id === contact.id);
+            if (idx !== -1) contactsRef.current[idx] = updated;
+          }
+          return;
+        }
+
         if (payload.text !== undefined) text = payload.text;
         if (payload.attachment) {
           attachment = payload.attachment;
@@ -522,6 +577,7 @@ export default function ChatLayout({ keys, myId }) {
         fromMe: false,
         text,
         attachment,
+        reactions: {},
         ts: msgData.ts,
         seq: msgData.seq,
         ttl: msgData.ttl || 0
@@ -715,6 +771,7 @@ export default function ChatLayout({ keys, myId }) {
         fromMe: true, 
         text: inputText, 
         attachment: attachmentMetadata || undefined,
+        reactions: {},
         ts, 
         seq, 
         status: 'sending', 
@@ -727,6 +784,136 @@ export default function ChatLayout({ keys, myId }) {
     } catch (err) {
       alert("Encryption or Socket Error: " + err.message);
       console.error(err);
+    }
+  };
+
+  const handleToggleReaction = async (targetSeq, emoji) => {
+    if (!activeContact) return;
+
+    let nextReactions = {};
+    setMessages(prev => prev.map(m => {
+      if (m.seq === targetSeq) {
+        const curReactions = { ...(m.reactions || {}) };
+        const curUsers = curReactions[emoji] || [];
+        if (curUsers.includes(myId)) {
+          curReactions[emoji] = curUsers.filter(id => id !== myId);
+          if (curReactions[emoji].length === 0) {
+            delete curReactions[emoji];
+          }
+        } else {
+          curReactions[emoji] = [...curUsers, myId];
+        }
+        nextReactions = curReactions;
+        return { ...m, reactions: curReactions };
+      }
+      return m;
+    }));
+
+    setActiveReactionSeq(null);
+
+    await updateMessageReactions(activeContact.id, targetSeq, nextReactions).catch(console.error);
+
+    try {
+      let ratchet = sessionKeys.current[activeContact.id];
+      if (!ratchet) {
+        const bundle = await new Promise((resolve) => {
+          if (pendingBundleRequests.current[activeContact.id]) {
+            const existing = pendingBundleRequests.current[activeContact.id];
+            pendingBundleRequests.current[activeContact.id] = (b) => {
+              existing(b);
+              resolve(b);
+            };
+          } else {
+            pendingBundleRequests.current[activeContact.id] = resolve;
+            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: activeContact.id }));
+          }
+          setTimeout(() => {
+            if (pendingBundleRequests.current[activeContact.id]) {
+              delete pendingBundleRequests.current[activeContact.id];
+              resolve(null);
+            }
+          }, 5000);
+        });
+        if (!bundle) return;
+        if (!sessionKeys.current[activeContact.id]) {
+          verifyPreKeyBundle(bundle, activeContact.ed25519Pub);
+          const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, activeContact.id);
+          const theirPub = base64ToBytes(bundle.signedPreKey.pub);
+          ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
+          ratchet.ekpub = sess.ephemeralX25519PubB64;
+          ratchet.kemct = sess.kemCiphertextB64;
+          ratchet.opkId = sess.opkId;
+          sessionKeys.current[activeContact.id] = ratchet;
+        } else {
+          ratchet = sessionKeys.current[activeContact.id];
+        }
+      }
+
+      let ekpub = undefined, kemct = undefined, opkId = undefined;
+      if (ratchet.ekpub && ratchet.kemct) {
+        ekpub = ratchet.ekpub;
+        kemct = ratchet.kemct;
+        opkId = ratchet.opkId;
+        delete ratchet.ekpub;
+        delete ratchet.kemct;
+        delete ratchet.opkId;
+      }
+
+      const seq = Date.now();
+      const ts = Date.now();
+
+      const innerPayload = JSON.stringify({
+        action: 'reaction',
+        targetSeq,
+        emoji,
+        deliveryToken: keys.profile.deliveryTokenB64
+      });
+
+      const { header, iv, ct } = await ratchet.encryptMessage(innerPayload);
+
+      const { saveRatchetState } = await import('../crypto/keyStorage.js');
+      await saveRatchetState(activeContact.id, ratchet.serialize());
+
+      const envelope = {
+        v: 1, type: 'msg',
+        from: myId, to: activeContact.id,
+        seq, ts, iv, ct, rh: header, ttl: 0
+      };
+
+      if (ekpub && kemct) {
+        envelope.ekpub = ekpub;
+        envelope.kemct = kemct;
+        if (opkId) envelope.opkId = opkId;
+      }
+
+      let finalPayload = envelope;
+      if (activeContact.deliveryToken && mySenderCertRef.current) {
+        const { sealMessage } = await import('../crypto/sealedSender.js');
+        delete envelope.from;
+        const sealedEnvelope = await sealMessage(
+          activeContact.x25519Pub,
+          mySenderCertRef.current,
+          JSON.stringify(envelope)
+        );
+        finalPayload = {
+          type: 'sealed_msg',
+          to: activeContact.id,
+          ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
+          envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
+          mac: sealedEnvelope.mac,
+          iv: sealedEnvelope.iv,
+          deliveryToken: activeContact.deliveryToken
+        };
+      }
+
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify(finalPayload));
+      } else {
+        const { saveToOutbox } = await import('../storage/db.js');
+        await saveToOutbox(finalPayload);
+      }
+    } catch (err) {
+      console.error("[VEIL] Failed to send reaction:", err);
     }
   };
 
@@ -867,9 +1054,54 @@ export default function ChatLayout({ keys, myId }) {
           </div>
 
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative">
+          <div 
+            className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative"
+            onClick={() => { if (activeReactionSeq) setActiveReactionSeq(null); }}
+          >
             {messages.map(m => (
-              <div key={m.seq} className={`max-w-[85%] md:max-w-[80%] p-3 md:p-4 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}>
+              <div 
+                key={m.seq} 
+                className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
+              >
+                {/* Floating Emoji Picker Popover */}
+                {activeReactionSeq === m.seq && (
+                  <div 
+                    className={`absolute z-30 -top-11 ${m.fromMe ? 'right-0' : 'left-0'} flex items-center gap-1.5 px-2.5 py-1.5 bg-stark-bg/95 backdrop-blur-md border border-arc-cyan/50 rounded-full shadow-glow-cyan animate-in fade-in zoom-in-95 duration-150`}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    {EMOJI_LIST.map(emoji => {
+                      const reacted = m.reactions?.[emoji]?.includes(myId);
+                      return (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleReaction(m.seq, emoji);
+                          }}
+                          className={`text-base md:text-lg hover:scale-125 transform transition-transform p-1 rounded-full ${reacted ? 'bg-arc-cyan/30 ring-1 ring-arc-cyan' : 'hover:bg-white/10'}`}
+                          title={reacted ? "Remove reaction" : "React"}
+                        >
+                          {emoji}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Reaction Trigger Button (Smile Icon) */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActiveReactionSeq(activeReactionSeq === m.seq ? null : m.seq);
+                  }}
+                  className={`absolute -top-3 ${m.fromMe ? 'left-2' : 'right-2'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${activeReactionSeq === m.seq ? '!opacity-100' : ''}`}
+                  title="Add reaction"
+                >
+                  <Smile size={12} />
+                </button>
+
                 {/* Encrypted Attachment Rendering */}
                 {m.attachment && (
                   <div className="mb-2.5">
@@ -888,7 +1120,7 @@ export default function ChatLayout({ keys, myId }) {
                       if (media.error) {
                         return (
                           <div className="p-2.5 bg-stark-crimson/10 border border-stark-crimson/40 rounded text-stark-crimson font-mono text-xs flex items-center justify-between">
-                            <span className="truncate">FAILED TO DECRYPT ({media.error})</span>
+                            <span className="truncate FAILED TO DECRYPT ({media.error})">FAILED TO DECRYPT ({media.error})</span>
                             <button onClick={() => loadAttachment(m.attachment)} className="underline ml-2 uppercase text-[10px]">RETRY</button>
                           </div>
                         );
@@ -952,6 +1184,36 @@ export default function ChatLayout({ keys, myId }) {
                 )}
 
                 {m.text && <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : 'text-gray-200'} break-words`}>{m.text}</div>}
+
+                {/* Reaction Pills */}
+                {m.reactions && Object.keys(m.reactions).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {Object.entries(m.reactions).map(([emoji, users]) => {
+                      if (!users || users.length === 0) return null;
+                      const hasMine = users.includes(myId);
+                      return (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleReaction(m.seq, emoji);
+                          }}
+                          className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-mono transition-all border ${
+                            hasMine 
+                              ? 'bg-arc-cyan/20 border-arc-cyan text-arc-cyan shadow-[0_0_8px_rgba(0,240,255,0.25)]' 
+                              : 'bg-stark-surface/80 border-slate-700 text-gray-300 hover:border-slate-500'
+                          }`}
+                          title={`${users.length} reaction${users.length > 1 ? 's' : ''}`}
+                        >
+                          <span>{emoji}</span>
+                          <span className="text-[10px] font-bold">{users.length}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div className="text-[9px] md:text-[10px] font-mono text-arc-cyan/50 mt-2 flex justify-end items-center gap-2">
                   {m.ttl > 0 && m.status === 'read' && m.readAt && (
                     <span className="text-stark-gold font-bold flex items-center gap-1">

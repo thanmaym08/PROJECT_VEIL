@@ -126,6 +126,41 @@ export async function updateMessageStatus(contactId, seq, status, extraProps = {
   });
 }
 
+export async function updateMessageReactions(contactId, seq, reactions) {
+  const ramMsgs = volatileMemory.get(contactId);
+  if (ramMsgs) {
+    const idx = ramMsgs.findIndex(m => m.seq === seq);
+    if (idx !== -1) {
+      ramMsgs[idx] = { ...ramMsgs[idx], reactions };
+      return Promise.resolve();
+    }
+  }
+
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("messages", "readwrite");
+    const store = tx.objectStore("messages");
+    const index = store.index("contactId");
+    const req = index.openCursor(IDBKeyRange.only(contactId));
+    
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        if (cursor.value.seq === seq) {
+          const updatedMsg = { ...cursor.value, reactions };
+          cursor.update(updatedMsg);
+          resolve();
+          return;
+        }
+        cursor.continue();
+      } else {
+        resolve();
+      }
+    };
+    req.onerror = () => reject();
+  });
+}
+
 export async function deleteMessage(contactId, seq) {
   const ramMsgs = volatileMemory.get(contactId);
   if (ramMsgs) {

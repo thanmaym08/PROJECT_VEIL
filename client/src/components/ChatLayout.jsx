@@ -7,6 +7,7 @@ import SafetyNumberModal from './SafetyNumberModal';
 import CreateGroupModal from './CreateGroupModal';
 import GroupInfoModal from './GroupInfoModal';
 import JoinGroupModal from './JoinGroupModal';
+import EmojiGifPicker from './EmojiGifPicker';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes } from '../crypto/utils';
@@ -141,6 +142,8 @@ export default function ChatLayout({ keys, myId }) {
 
   // Emoji Reaction State
   const [activeReactionSeq, setActiveReactionSeq] = useState(null);
+  const [showInputEmojiPicker, setShowInputEmojiPicker] = useState(false);
+  const [reactionEmojiPickerSeq, setReactionEmojiPickerSeq] = useState(null);
 
   // Message Quoting / Replying State
   const [replyingTo, setReplyingTo] = useState(null); // { seq, senderId, senderName, text, hasAttachment }
@@ -1208,6 +1211,99 @@ export default function ChatLayout({ keys, myId }) {
     }
   };
 
+  const sendEncryptedPayload = async (text, attachmentMetadata = null) => {
+    if (!activeContact && !activeGroup) return;
+
+    try {
+      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+      const seq = Date.now();
+      const ts = Date.now();
+
+      const replyPayload = replyingTo ? {
+        seq: replyingTo.seq,
+        senderId: replyingTo.senderId,
+        senderName: replyingTo.senderName,
+        text: (replyingTo.text || '').slice(0, 200),
+        hasAttachment: !!replyingTo.hasAttachment
+      } : undefined;
+
+      if (activeContact) {
+        const ttl = vanishModes[activeContact.id] || 0;
+        const innerPayload = {
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          deliveryToken: keys.profile.deliveryTokenB64,
+          replyTo: replyPayload,
+          senderName: myDisplayName
+        };
+
+        await encryptAndSendToPeer(activeContact, innerPayload, ttl);
+
+        const msgObj = {
+          contactId: activeContact.id,
+          fromMe: true,
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload,
+          reactions: {},
+          ts,
+          seq,
+          status: 'sending',
+          ttl
+        };
+        await saveMessage(msgObj);
+        setMessages(prev => [...prev, msgObj]);
+      } else if (activeGroup) {
+        const group = activeGroup;
+        const ttl = vanishModes[group.id] || 0;
+        const innerPayload = {
+          groupId: group.id,
+          groupName: group.name,
+          senderId: myId,
+          senderName: myDisplayName,
+          senderX25519Pub: keys.x25519.publicKeyB64,
+          senderEd25519Pub: keys.ed25519.publicKeyB64,
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload
+        };
+
+        const otherMembers = (group.members || []).filter(m => m.id !== myId);
+        for (const member of otherMembers) {
+          try {
+            const target = contacts.find(c => c.id === member.id) || member;
+            await encryptAndSendToPeer(target, innerPayload, ttl);
+          } catch (err) {
+            console.warn(`[VEIL] Fan-out error to ${member.name}:`, err);
+          }
+        }
+
+        const msgObj = {
+          contactId: group.id,
+          groupId: group.id,
+          fromMe: true,
+          senderId: myId,
+          senderName: myDisplayName,
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload,
+          reactions: {},
+          ts,
+          seq,
+          status: 'delivered',
+          ttl
+        };
+        await saveMessage(msgObj);
+        setMessages(prev => [...prev, msgObj]);
+      }
+
+      setReplyingTo(null);
+    } catch (err) {
+      alert("Encryption or Socket Error: " + err.message);
+      console.error(err);
+    }
+  };
+
   const handleSend = async (e) => {
     if (e) e.preventDefault();
     if ((!inputText.trim() && !stagedAttachment) || (!activeContact && !activeGroup)) return;
@@ -1248,96 +1344,39 @@ export default function ChatLayout({ keys, myId }) {
       setUploadingAttachment(false);
     }
 
-    try {
-      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
-      const seq = Date.now();
-      const ts = Date.now();
+    await sendEncryptedPayload(inputText, attachmentMetadata);
+    setInputText('');
+    setStagedAttachment(null);
+  };
 
-      const replyPayload = replyingTo ? {
-        seq: replyingTo.seq,
-        senderId: replyingTo.senderId,
-        senderName: replyingTo.senderName,
-        text: (replyingTo.text || '').slice(0, 200),
-        hasAttachment: !!replyingTo.hasAttachment
-      } : undefined;
+  const handleInsertEmoji = (emoji) => {
+    setInputText(prev => prev + emoji);
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 50);
+  };
 
-      if (activeContact) {
-        const ttl = vanishModes[activeContact.id] || 0;
-        const innerPayload = {
-          text: inputText,
-          attachment: attachmentMetadata || undefined,
-          deliveryToken: keys.profile.deliveryTokenB64,
-          replyTo: replyPayload,
-          senderName: myDisplayName
-        };
+  const handleSendGif = async (gif) => {
+    setShowInputEmojiPicker(false);
+    const attachmentMetadata = {
+      isGif: true,
+      gifUrl: gif.url,
+      previewUrl: gif.preview || gif.url,
+      fileName: (gif.title || 'cyber_gif') + '.gif',
+      mimeType: 'image/gif'
+    };
+    await sendEncryptedPayload('', attachmentMetadata);
+  };
 
-        await encryptAndSendToPeer(activeContact, innerPayload, ttl);
-
-        const msgObj = {
-          contactId: activeContact.id,
-          fromMe: true,
-          text: inputText,
-          attachment: attachmentMetadata || undefined,
-          replyTo: replyPayload,
-          reactions: {},
-          ts,
-          seq,
-          status: 'sending',
-          ttl
-        };
-        await saveMessage(msgObj);
-        setMessages(prev => [...prev, msgObj]);
-      } else if (activeGroup) {
-        const group = activeGroup;
-        const ttl = vanishModes[group.id] || 0;
-        const innerPayload = {
-          groupId: group.id,
-          groupName: group.name,
-          senderId: myId,
-          senderName: myDisplayName,
-          senderX25519Pub: keys.x25519.publicKeyB64,
-          senderEd25519Pub: keys.ed25519.publicKeyB64,
-          text: inputText,
-          attachment: attachmentMetadata || undefined,
-          replyTo: replyPayload
-        };
-
-        const otherMembers = (group.members || []).filter(m => m.id !== myId);
-        for (const member of otherMembers) {
-          try {
-            const target = contacts.find(c => c.id === member.id) || member;
-            await encryptAndSendToPeer(target, innerPayload, ttl);
-          } catch (err) {
-            console.warn(`[VEIL] Fan-out error to ${member.name}:`, err);
-          }
-        }
-
-        const msgObj = {
-          contactId: group.id,
-          groupId: group.id,
-          fromMe: true,
-          senderId: myId,
-          senderName: myDisplayName,
-          text: inputText,
-          attachment: attachmentMetadata || undefined,
-          replyTo: replyPayload,
-          reactions: {},
-          ts,
-          seq,
-          status: 'delivered',
-          ttl
-        };
-        await saveMessage(msgObj);
-        setMessages(prev => [...prev, msgObj]);
-      }
-
-      setInputText('');
-      setStagedAttachment(null);
-      setReplyingTo(null);
-    } catch (err) {
-      alert("Encryption or Socket Error: " + err.message);
-      console.error(err);
-    }
+  const handleSendSticker = async (st) => {
+    setShowInputEmojiPicker(false);
+    const attachmentMetadata = {
+      isSticker: true,
+      icon: st.icon,
+      title: st.title,
+      sub: st.sub
+    };
+    await sendEncryptedPayload('', attachmentMetadata);
   };
 
   const handleToggleReaction = async (targetSeq, emoji) => {
@@ -1731,6 +1770,18 @@ export default function ChatLayout({ keys, myId }) {
                           </button>
                         );
                       })}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveReactionSeq(null);
+                          setReactionEmojiPickerSeq(m.seq);
+                        }}
+                        className="text-xs md:text-sm text-arc-cyan hover:text-white p-1 hover:bg-arc-cyan/20 rounded-full transition-colors flex items-center justify-center font-bold"
+                        title="All Emojis (WhatsApp style)"
+                      >
+                        <Plus size={14} />
+                      </button>
                     </div>
                   )}
 
@@ -1817,6 +1868,33 @@ export default function ChatLayout({ keys, myId }) {
                 {m.attachment && (
                   <div className="mb-2.5">
                     {(() => {
+                      if (m.attachment.isSticker) {
+                        return (
+                          <div className="p-3 bg-stark-bg/90 border border-arc-cyan/50 rounded shadow-glow-cyan flex flex-col gap-1 max-w-xs animate-in zoom-in-95 duration-200">
+                            <div className="text-3xl">{m.attachment.icon}</div>
+                            <div className="font-hud font-bold text-xs tracking-wider text-arc-cyan uppercase">{m.attachment.title}</div>
+                            <div className="font-mono text-[9px] text-gray-400">{m.attachment.sub}</div>
+                          </div>
+                        );
+                      }
+                      if (m.attachment.isGif) {
+                        const gifSrc = m.attachment.gifUrl || m.attachment.previewUrl;
+                        return (
+                          <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
+                            <img 
+                              src={gifSrc} 
+                              alt={m.attachment.fileName || 'Encrypted GIF'}
+                              className="w-full max-h-64 object-contain cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
+                              onClick={() => setLightboxImage(gifSrc)}
+                              loading="lazy"
+                            />
+                            <div className="p-1 bg-black/70 flex justify-between items-center text-[9px] font-mono text-arc-cyan border-t border-arc-cyan/20">
+                              <span className="truncate max-w-[150px]">{m.attachment.fileName || 'QUANTUM_GIF'}</span>
+                              <span className="opacity-60 uppercase text-[8px] bg-arc-cyan/20 px-1 py-0.5 rounded">ENCRYPTED GIF</span>
+                            </div>
+                          </div>
+                        );
+                      }
                       const media = decryptedMedia[m.attachment.id];
                       if (!media || media.loading) {
                         return (
@@ -1975,6 +2053,19 @@ export default function ChatLayout({ keys, myId }) {
               accept="image/*,video/*,audio/*,application/pdf,text/*"
             />
             <form onSubmit={handleSend} className="flex flex-col gap-2 relative">
+              {/* Emoji / GIF / Sticker Dock Tray */}
+              {showInputEmojiPicker && (
+                <div className="mb-2">
+                  <EmojiGifPicker 
+                    mode="all"
+                    onSelectEmoji={handleInsertEmoji}
+                    onSelectGif={handleSendGif}
+                    onSelectSticker={handleSendSticker}
+                    onClose={() => setShowInputEmojiPicker(false)}
+                  />
+                </div>
+              )}
+
               {/* Replying Context Banner */}
               {replyingTo && (
                 <div className="flex items-center justify-between p-2 bg-stark-card border-l-2 border-arc-cyan border-y border-r border-arc-cyan/30 text-xs font-mono shadow-glow-cyan animate-in fade-in slide-in-from-bottom-2 duration-150">
@@ -2033,6 +2124,18 @@ export default function ChatLayout({ keys, myId }) {
                   title="Encrypt & Attach Media"
                 >
                   {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Paperclip size={16} />}
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setShowInputEmojiPicker(!showInputEmojiPicker)}
+                  className={`p-2 md:p-3 flex items-center justify-center transition-all duration-200 border ${
+                    showInputEmojiPicker 
+                      ? 'bg-arc-cyan/30 text-white border-arc-cyan shadow-glow-cyan' 
+                      : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan/30 text-arc-cyan hover:shadow-glow-cyan'
+                  }`}
+                  title="Emojis, GIFs & Cyber-Stickers"
+                >
+                  <Smile size={16} />
                 </button>
                 <input 
                   ref={inputRef}
@@ -2142,6 +2245,34 @@ export default function ChatLayout({ keys, myId }) {
             await loadContacts();
           }}
         />
+      )}
+
+      {/* Full WhatsApp Emoji Picker for Reactions */}
+      {reactionEmojiPickerSeq && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setReactionEmojiPickerSeq(null)}
+        >
+          <div className="w-full max-w-sm sm:max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center bg-stark-bg border border-arc-cyan/40 px-3 py-2 text-xs font-hud text-arc-cyan border-b-0">
+              <span className="tracking-widest">TRANSMISSION REACTION</span>
+              <button 
+                onClick={() => setReactionEmojiPickerSeq(null)} 
+                className="text-arc-cyan hover:text-stark-crimson p-1 transition-colors"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <EmojiGifPicker
+              mode="emoji-only"
+              onSelectEmoji={(emoji) => {
+                handleToggleReaction(reactionEmojiPickerSeq, emoji);
+                setReactionEmojiPickerSeq(null);
+              }}
+              onClose={() => setReactionEmojiPickerSeq(null)}
+            />
+          </div>
+        </div>
       )}
 
       {/* Decrypted Media Lightbox Modal */}

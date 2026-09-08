@@ -1,9 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
+import CreateGroupModal from './CreateGroupModal';
+import GroupInfoModal from './GroupInfoModal';
+import JoinGroupModal from './JoinGroupModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes } from '../crypto/utils';
@@ -107,9 +110,24 @@ function SwipeableMessageRow({ children, onReply, disabled }) {
 export default function ChatLayout({ keys, myId }) {
   const [contacts, setContacts] = useState([]);
   const [activeContact, setActiveContact] = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [activeGroup, setActiveGroup] = useState(null);
+  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'direct' | 'groups'
   const [messages, setMessages] = useState([]);
   const [wsStatus, setWsStatus] = useState('connecting');
   const [showAddContact, setShowAddContact] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
+  const [incomingInvite, setIncomingInvite] = useState(null);
+  const [toastMessage, setToastMessage] = useState(null);
+  const toastTimeoutRef = useRef(null);
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    toastTimeoutRef.current = setTimeout(() => setToastMessage(null), 3000);
+  };
+
   const [showSafetyNumber, setShowSafetyNumber] = useState(false);
   const [inputText, setInputText] = useState('');
   
@@ -128,10 +146,12 @@ export default function ChatLayout({ keys, myId }) {
   const [replyingTo, setReplyingTo] = useState(null); // { seq, senderId, senderName, text, hasAttachment }
 
   const startReply = (m) => {
+    let targetId = m.fromMe ? myId : (m.senderId || activeContact?.id || activeGroup?.id);
+    let targetName = m.fromMe ? 'YOU' : (m.senderName || activeContact?.name || activeGroup?.name || 'Member');
     setReplyingTo({
       seq: m.seq,
-      senderId: m.fromMe ? myId : activeContact.id,
-      senderName: m.fromMe ? 'YOU' : activeContact.name,
+      senderId: targetId,
+      senderName: targetName,
       fromMe: m.fromMe,
       text: m.text,
       hasAttachment: !!m.attachment
@@ -153,6 +173,8 @@ export default function ChatLayout({ keys, myId }) {
   // CRITICAL FIX: ref to contacts so WebSocket handlers always see fresh list
   const contactsRef = useRef([]);
   const activeContactRef = useRef(null);
+  const groupsRef = useRef([]);
+  const activeGroupRef = useRef(null);
   const pendingBundleRequests = useRef({});
   const serverIdentityPubRef = useRef(null);
   const mySenderCertRef = useRef(null);
@@ -164,7 +186,24 @@ export default function ChatLayout({ keys, myId }) {
 
   useEffect(() => {
     loadContacts();
+    loadGroups();
     connectWs();
+
+    // Check URL for ?joinGroup=...
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const joinPayload = params.get('joinGroup');
+      if (joinPayload) {
+        try {
+          const decoded = JSON.parse(decodeURIComponent(escape(atob(joinPayload))));
+          if (decoded && decoded.id && decoded.name) {
+            setIncomingInvite(decoded);
+          }
+        } catch (err) {
+          console.warn("[VEIL] Failed to decode group invite:", err);
+        }
+      }
+    }
 
     const handleResume = () => {
       if (!ws.current || ws.current.readyState === WebSocket.CLOSED || ws.current.readyState === WebSocket.CLOSING) {
@@ -198,9 +237,20 @@ export default function ChatLayout({ keys, myId }) {
   useEffect(() => {
     activeContactRef.current = activeContact;
     if (activeContact) {
+      activeGroupRef.current = null;
+      setActiveGroup(null);
       getMessages(activeContact.id).then(setMessages);
     }
   }, [activeContact]);
+
+  useEffect(() => {
+    activeGroupRef.current = activeGroup;
+    if (activeGroup) {
+      activeContactRef.current = null;
+      setActiveContact(null);
+      getMessages(activeGroup.id).then(setMessages);
+    }
+  }, [activeGroup]);
 
   // Read Receipts & Self-Destruct trigger
   useEffect(() => {
@@ -229,7 +279,8 @@ export default function ChatLayout({ keys, myId }) {
           if (m.ttl > 0 && m.status === 'read' && m.readAt) {
             if (now - m.readAt >= m.ttl) {
               changed = true;
-              deleteMessage(activeContactRef.current?.id, m.seq).catch(()=>{});
+              const activeId = activeContactRef.current?.id || activeGroupRef.current?.id;
+              if (activeId) deleteMessage(activeId, m.seq).catch(()=>{});
               return false;
             }
           }
@@ -259,6 +310,305 @@ export default function ChatLayout({ keys, myId }) {
         console.error("Failed to load ratchet state for", contact.id, e);
       }
     }
+  };
+
+  const loadGroups = async () => {
+    try {
+      const g = await getGroups();
+      groupsRef.current = g;
+      setGroups(g);
+    } catch (e) {
+      console.error("Failed to load groups:", e);
+    }
+  };
+
+  const ensureGroupExists = async (groupId, groupName, senderId, senderName) => {
+    if (!groupsRef.current.some(g => g.id === groupId)) {
+      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+      const newGroup = {
+        id: groupId,
+        name: groupName || 'Encrypted Group',
+        members: [
+          { id: myId, name: myDisplayName, role: 'member' },
+          { id: senderId, name: senderName || 'Member', role: 'member' }
+        ],
+        createdBy: senderId,
+        createdAt: Date.now()
+      };
+      await saveGroup(newGroup);
+      const updated = await getGroups();
+      groupsRef.current = updated;
+      setGroups(updated);
+    }
+  };
+
+  const encryptAndSendToPeer = async (targetContact, payloadData, ttl = 0) => {
+    const peerId = targetContact.id;
+    let ratchet = sessionKeys.current[peerId];
+    let ekpub = undefined, kemct = undefined, opkId = undefined;
+
+    if (!ratchet) {
+      const bundle = await new Promise((resolve) => {
+        if (pendingBundleRequests.current[peerId]) {
+          const existing = pendingBundleRequests.current[peerId];
+          pendingBundleRequests.current[peerId] = (b) => {
+            existing(b);
+            resolve(b);
+          };
+        } else {
+          pendingBundleRequests.current[peerId] = resolve;
+          if (ws.current?.readyState === WebSocket.OPEN) {
+            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: peerId }));
+          } else {
+            resolve(null);
+          }
+        }
+        setTimeout(() => {
+          if (pendingBundleRequests.current[peerId]) {
+            delete pendingBundleRequests.current[peerId];
+            resolve(null);
+          }
+        }, 5000);
+      });
+
+      if (!bundle) throw new Error(`Could not fetch prekeys for peer ${peerId.slice(0, 8)}`);
+
+      if (!sessionKeys.current[peerId]) {
+        const idPub = targetContact.ed25519Pub || bundle.identity?.identityEd25519Pub;
+        if (idPub) {
+          try {
+            verifyPreKeyBundle(bundle, idPub);
+          } catch (verr) {
+            console.warn("[VEIL] PreKey bundle signature check:", verr.message);
+          }
+        }
+        const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, peerId);
+        const theirPub = base64ToBytes(bundle.signedPreKey.pub);
+        ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
+        ratchet.ekpub = sess.ephemeralX25519PubB64;
+        ratchet.kemct = sess.kemCiphertextB64;
+        ratchet.opkId = sess.opkId;
+        sessionKeys.current[peerId] = ratchet;
+      } else {
+        ratchet = sessionKeys.current[peerId];
+      }
+    }
+
+    if (ratchet.ekpub && ratchet.kemct) {
+      ekpub = ratchet.ekpub;
+      kemct = ratchet.kemct;
+      opkId = ratchet.opkId;
+      delete ratchet.ekpub;
+      delete ratchet.kemct;
+      delete ratchet.opkId;
+    }
+
+    const seq = Date.now() + Math.floor(Math.random() * 1000);
+    const ts = Date.now();
+
+    const innerPayloadStr = typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData);
+    const { header, iv, ct } = await ratchet.encryptMessage(innerPayloadStr);
+
+    const { saveRatchetState } = await import('../crypto/keyStorage.js');
+    await saveRatchetState(peerId, ratchet.serialize());
+
+    const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+
+    const envelope = {
+      v: 1,
+      type: 'msg',
+      from: myId,
+      to: peerId,
+      seq,
+      ts,
+      iv,
+      ct,
+      rh: header,
+      ttl: ttl || 0,
+      senderX25519Pub: keys.x25519.publicKeyB64,
+      senderEd25519Pub: keys.ed25519.publicKeyB64,
+      senderName: myDisplayName
+    };
+
+    if (ekpub && kemct) {
+      envelope.ekpub = ekpub;
+      envelope.kemct = kemct;
+      if (opkId) envelope.opkId = opkId;
+    }
+
+    let finalPayload = envelope;
+    if (targetContact.deliveryToken && mySenderCertRef.current) {
+      const { sealMessage } = await import('../crypto/sealedSender.js');
+      delete envelope.from;
+      const sealedEnvelope = await sealMessage(
+        targetContact.x25519Pub,
+        mySenderCertRef.current,
+        JSON.stringify(envelope)
+      );
+      finalPayload = {
+        type: 'sealed_msg',
+        to: peerId,
+        ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
+        envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
+        mac: sealedEnvelope.mac,
+        iv: sealedEnvelope.iv,
+        deliveryToken: targetContact.deliveryToken
+      };
+    }
+
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify(finalPayload));
+    } else {
+      const { saveToOutbox } = await import('../storage/db.js');
+      await saveToOutbox(finalPayload);
+    }
+
+    return { seq, ts };
+  };
+
+  const handleCreateGroup = async (groupName, selectedMembers) => {
+    const groupId = 'group-' + Math.random().toString(36).slice(2, 9) + '-' + Date.now();
+    const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+    const newGroup = {
+      id: groupId,
+      name: groupName,
+      createdBy: myId,
+      createdAt: Date.now(),
+      members: [
+        { id: myId, name: myDisplayName, role: 'admin' },
+        ...selectedMembers
+      ]
+    };
+
+    await saveGroup(newGroup);
+    const updated = await getGroups();
+    groupsRef.current = updated;
+    setGroups(updated);
+    setShowCreateGroup(false);
+
+    // Notify selected members
+    const initPayload = {
+      type: 'group_event',
+      action: 'create',
+      groupId,
+      groupName,
+      members: newGroup.members,
+      senderId: myId,
+      senderName: myDisplayName,
+      text: `Created group "${groupName}"`
+    };
+
+    for (const member of selectedMembers) {
+      try {
+        const target = contacts.find(c => c.id === member.id) || member;
+        await encryptAndSendToPeer(target, initPayload, 0);
+      } catch (err) {
+        console.warn(`[VEIL] Initial group notify failed to ${member.name}:`, err);
+      }
+    }
+
+    setActiveContact(null);
+    setActiveGroup(newGroup);
+    showToast(`Encrypted group "${groupName}" created!`);
+  };
+
+  const handleAddMembersToGroup = async (groupId, newMembers) => {
+    const group = await getGroup(groupId);
+    if (!group) return;
+
+    const existingIds = new Set((group.members || []).map(m => m.id));
+    const merged = [...(group.members || [])];
+    newMembers.forEach(m => {
+      if (!existingIds.has(m.id)) merged.push(m);
+    });
+
+    const updatedGroup = { ...group, members: merged };
+    await saveGroup(updatedGroup);
+    const allGroups = await getGroups();
+    groupsRef.current = allGroups;
+    setGroups(allGroups);
+    if (activeGroup?.id === groupId) setActiveGroup(updatedGroup);
+
+    const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+    const eventPayload = {
+      type: 'group_event',
+      action: 'add_members',
+      groupId,
+      groupName: group.name,
+      members: merged,
+      senderId: myId,
+      senderName: myDisplayName,
+      text: `Added ${newMembers.map(m => m.name).join(', ')} to the group`
+    };
+
+    for (const member of merged.filter(m => m.id !== myId)) {
+      try {
+        const target = contacts.find(c => c.id === member.id) || member;
+        await encryptAndSendToPeer(target, eventPayload, 0);
+      } catch (e) {}
+    }
+
+    showToast(`Added ${newMembers.length} friend${newMembers.length > 1 ? 's' : ''} to group!`);
+  };
+
+  const handleAddFriendFromGroup = async (member) => {
+    if (!member || !member.id || member.id === myId) return;
+    const newContact = {
+      id: member.id,
+      name: member.name || `Agent-${member.id.slice(0, 4)}`,
+      verified: true,
+      addedAt: Date.now()
+    };
+    await saveContact(newContact);
+    const updated = await getContacts();
+    contactsRef.current = updated;
+    setContacts(updated);
+    showToast(`Added ${newContact.name} to friends list!`);
+  };
+
+  const handleLeaveGroup = async (groupId) => {
+    await deleteGroup(groupId);
+    const allGroups = await getGroups();
+    groupsRef.current = allGroups;
+    setGroups(allGroups);
+    if (activeGroup?.id === groupId) {
+      setActiveGroup(null);
+      setMessages([]);
+    }
+    showToast(`Left and removed group channel.`);
+  };
+
+  const handleConfirmJoinGroup = async () => {
+    if (!incomingInvite) return;
+    const existing = groups.find(g => g.id === incomingInvite.id);
+    let targetGroup = existing;
+    if (!existing) {
+      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+      targetGroup = {
+        id: incomingInvite.id,
+        name: incomingInvite.name,
+        createdBy: incomingInvite.createdBy || incomingInvite.inviterId || 'unknown',
+        members: [
+          { id: myId, name: myDisplayName, role: 'member' },
+          ...(incomingInvite.inviterId ? [{ id: incomingInvite.inviterId, name: incomingInvite.inviterName || 'Inviter', role: 'admin' }] : [])
+        ],
+        createdAt: Date.now()
+      };
+      await saveGroup(targetGroup);
+      const updated = await getGroups();
+      groupsRef.current = updated;
+      setGroups(updated);
+    }
+    
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+      window.history.replaceState({ path: cleanUrl }, '', cleanUrl);
+    }
+
+    setIncomingInvite(null);
+    setActiveContact(null);
+    setActiveGroup(targetGroup);
+    showToast(`Joined group "${targetGroup.name}"!`);
   };
 
   const getApiBaseUrl = () => {
@@ -575,7 +925,6 @@ export default function ChatLayout({ keys, myId }) {
       }
 
       const contact = contactsRef.current.find(c => c.id === senderId);
-      if (!contact) return; // Drop messages from unknown contacts
 
       let ratchet = sessionKeys.current[senderId];
       if (msgData.ekpub && msgData.kemct) {
@@ -588,14 +937,37 @@ export default function ChatLayout({ keys, myId }) {
           const opkIndex = localPreKeys.oneTimePreKeys.findIndex(k => k.id === msgData.opkId);
           if (opkIndex !== -1) {
             opkPrivB64 = localPreKeys.oneTimePreKeys[opkIndex].priv;
-            // Delete consumed OPK from local storage immediately for forward secrecy
             localPreKeys.oneTimePreKeys.splice(opkIndex, 1);
             saveLocalPreKeys(localPreKeys).catch(() => {});
           }
         }
 
+        let senderX25519Pub = contact?.x25519Pub || msgData.senderX25519Pub;
+        if (!senderX25519Pub) {
+          // Fetch prekeys from server as fallback
+          const bundle = await new Promise(resolve => {
+            pendingBundleRequests.current[senderId] = resolve;
+            if (ws.current?.readyState === WebSocket.OPEN) {
+              ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: senderId }));
+            } else {
+              resolve(null);
+            }
+            setTimeout(() => {
+              if (pendingBundleRequests.current[senderId]) {
+                delete pendingBundleRequests.current[senderId];
+                resolve(null);
+              }
+            }, 4000);
+          });
+          if (bundle?.identity?.identityX25519Pub) {
+            senderX25519Pub = bundle.identity.identityX25519Pub;
+          }
+        }
+
+        if (!senderX25519Pub) throw new Error("Missing sender public key for session handshake");
+
         const sess = computeReceiverSession(
-          msgData.ekpub, msgData.kemct, contact.x25519Pub, msgData.opkId,
+          msgData.ekpub, msgData.kemct, senderX25519Pub, msgData.opkId,
           keys.x25519.secretKeyB64,
           localPreKeys.signedPreKey,
           localPreKeys.signedPqPreKey,
@@ -619,31 +991,37 @@ export default function ChatLayout({ keys, myId }) {
       let contactToken = null;
       let attachment = null;
       let replyTo = null;
+      let isGroupMsg = false;
+      let groupPayload = null;
+
       try {
         const payload = JSON.parse(decrypted);
+
         if (payload.action === 'reaction') {
-          const { targetSeq, emoji } = payload;
+          const { targetSeq, emoji, groupId } = payload;
+          const targetChatId = groupId || senderId;
           if (targetSeq && emoji) {
-            setMessages(prev => prev.map(m => {
+            const applyReaction = (curMsgs) => curMsgs.map(m => {
               if (m.seq === targetSeq) {
                 const curReactions = { ...(m.reactions || {}) };
                 const curUsers = curReactions[emoji] || [];
                 if (curUsers.includes(senderId)) {
                   curReactions[emoji] = curUsers.filter(id => id !== senderId);
-                  if (curReactions[emoji].length === 0) {
-                    delete curReactions[emoji];
-                  }
+                  if (curReactions[emoji].length === 0) delete curReactions[emoji];
                 } else {
                   curReactions[emoji] = [...curUsers, senderId];
                 }
-                updateMessageReactions(senderId, targetSeq, curReactions).catch(console.error);
+                updateMessageReactions(targetChatId, targetSeq, curReactions).catch(console.error);
                 return { ...m, reactions: curReactions };
               }
               return m;
-            }));
+            });
 
-            if (!activeContactRef.current || activeContactRef.current.id !== senderId) {
-              getMessages(senderId).then(allMsgs => {
+            setMessages(prev => applyReaction(prev));
+
+            const isCurrentChat = (groupId && activeGroupRef.current?.id === groupId) || (!groupId && activeContactRef.current?.id === senderId);
+            if (!isCurrentChat) {
+              getMessages(targetChatId).then(allMsgs => {
                 const target = allMsgs.find(m => m.seq === targetSeq);
                 if (target) {
                   const curReactions = { ...(target.reactions || {}) };
@@ -654,21 +1032,50 @@ export default function ChatLayout({ keys, myId }) {
                   } else {
                     curReactions[emoji] = [...curUsers, senderId];
                   }
-                  updateMessageReactions(senderId, targetSeq, curReactions).catch(console.error);
+                  updateMessageReactions(targetChatId, targetSeq, curReactions).catch(console.error);
                 }
               });
             }
           }
+          return;
+        }
 
-          if (payload.deliveryToken) contactToken = payload.deliveryToken;
-          if (contactToken && contact.deliveryToken !== contactToken) {
-            const updated = { ...contact, deliveryToken: contactToken };
-            await saveContact(updated);
-            setContacts(prev => prev.map(c => c.id === contact.id ? updated : c));
-            const idx = contactsRef.current.findIndex(c => c.id === contact.id);
-            if (idx !== -1) contactsRef.current[idx] = updated;
+        if (payload.type === 'group_event') {
+          if (payload.groupId) {
+            let g = await getGroup(payload.groupId);
+            const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+            if (!g) {
+              g = {
+                id: payload.groupId,
+                name: payload.groupName || 'Encrypted Group',
+                createdBy: payload.senderId || senderId,
+                createdAt: Date.now(),
+                members: payload.members || [
+                  { id: myId, name: myDisplayName, role: 'member' },
+                  { id: senderId, name: payload.senderName || `Agent-${senderId.slice(0, 4)}`, role: 'member' }
+                ]
+              };
+            } else if (payload.members) {
+              const existingIds = new Set(g.members.map(m => m.id));
+              const merged = [...g.members];
+              payload.members.forEach(m => {
+                if (!existingIds.has(m.id)) merged.push(m);
+              });
+              g.members = merged;
+            }
+            await saveGroup(g);
+            const allG = await getGroups();
+            groupsRef.current = allG;
+            setGroups(allG);
+            if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
+            showToast(`Group: ${payload.text || payload.groupName}`);
           }
           return;
+        }
+
+        if (payload.groupId) {
+          isGroupMsg = true;
+          groupPayload = payload;
         }
 
         if (payload.text !== undefined) text = payload.text;
@@ -681,13 +1088,86 @@ export default function ChatLayout({ keys, myId }) {
       } catch (e) {
         // legacy plaintext
       }
-      
-      if (contactToken && contact.deliveryToken !== contactToken) {
+
+      if (isGroupMsg && groupPayload) {
+        const gId = groupPayload.groupId;
+        let g = await getGroup(gId);
+        const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+        const senderDisplayName = groupPayload.senderName || msgData.senderName || (contact ? contact.name : `Agent-${senderId.slice(0, 4)}`);
+
+        if (!g) {
+          g = {
+            id: gId,
+            name: groupPayload.groupName || 'Encrypted Group',
+            createdBy: groupPayload.senderId || senderId,
+            createdAt: Date.now(),
+            members: [
+              { id: myId, name: myDisplayName, role: 'member' },
+              { id: senderId, name: senderDisplayName, role: 'member' }
+            ]
+          };
+          await saveGroup(g);
+          const allG = await getGroups();
+          groupsRef.current = allG;
+          setGroups(allG);
+        } else {
+          if (!g.members.some(m => m.id === senderId)) {
+            g.members.push({ id: senderId, name: senderDisplayName, role: 'member' });
+            await saveGroup(g);
+            const allG = await getGroups();
+            groupsRef.current = allG;
+            setGroups(allG);
+            if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
+          }
+        }
+
+        const msgObj = {
+          contactId: gId,
+          groupId: gId,
+          fromMe: false,
+          senderId,
+          senderName: senderDisplayName,
+          senderX25519Pub: groupPayload.senderX25519Pub || msgData.senderX25519Pub,
+          senderEd25519Pub: groupPayload.senderEd25519Pub || msgData.senderEd25519Pub,
+          text,
+          attachment,
+          replyTo: replyTo || undefined,
+          reactions: {},
+          ts: msgData.ts || Date.now(),
+          seq: msgData.seq || Date.now(),
+          ttl: msgData.ttl || 0
+        };
+
+        await saveMessage(msgObj);
+
+        if (activeGroupRef.current && activeGroupRef.current.id === gId) {
+          setMessages(prev => [...prev, msgObj]);
+        } else {
+          showToast(`New message in ${g.name}: ${senderDisplayName}`);
+        }
+        return;
+      }
+
+      // Direct 1-on-1 Message Flow
+      if (!contact) {
+        const senderDisplayName = msgData.senderName || `Agent-${senderId.slice(0, 4)}`;
+        const newContact = {
+          id: senderId,
+          name: senderDisplayName,
+          x25519Pub: msgData.senderX25519Pub || null,
+          ed25519Pub: msgData.senderEd25519Pub || null,
+          deliveryToken: contactToken || null,
+          verified: false,
+          addedAt: Date.now()
+        };
+        await saveContact(newContact);
+        const updatedContacts = await getContacts();
+        contactsRef.current = updatedContacts;
+        setContacts(updatedContacts);
+      } else if (contactToken && contact.deliveryToken !== contactToken) {
         const updated = { ...contact, deliveryToken: contactToken };
         await saveContact(updated);
-        // Need to update state too
         setContacts(prev => prev.map(c => c.id === contact.id ? updated : c));
-        // Update ref immediately
         const idx = contactsRef.current.findIndex(c => c.id === contact.id);
         if (idx !== -1) contactsRef.current[idx] = updated;
       }
@@ -730,7 +1210,7 @@ export default function ChatLayout({ keys, myId }) {
 
   const handleSend = async (e) => {
     if (e) e.preventDefault();
-    if ((!inputText.trim() && !stagedAttachment) || !activeContact) return;
+    if ((!inputText.trim() && !stagedAttachment) || (!activeContact && !activeGroup)) return;
 
     let attachmentMetadata = null;
     if (stagedAttachment) {
@@ -747,7 +1227,6 @@ export default function ChatLayout({ keys, myId }) {
           fileSize: encrypted.fileSize,
           mimeType: encrypted.mimeType
         };
-        // Cache decrypted blob locally so sender sees their own media instantly
         if (stagedAttachment.previewUrl) {
           setDecryptedMedia(prev => ({
             ...prev,
@@ -770,67 +1249,10 @@ export default function ChatLayout({ keys, myId }) {
     }
 
     try {
-      let ratchet = sessionKeys.current[activeContact.id];
-      let ekpub = undefined, kemct = undefined;
-
-      let opkId = undefined;
-
-      if (!ratchet) {
-        // Fetch bundle (will hit prefetch or wait for it)
-        const bundle = await new Promise((resolve) => {
-          if (pendingBundleRequests.current[activeContact.id]) {
-            // Already fetching, intercept it
-            const existing = pendingBundleRequests.current[activeContact.id];
-            pendingBundleRequests.current[activeContact.id] = (b) => {
-              existing(b);
-              resolve(b);
-            };
-          } else {
-            pendingBundleRequests.current[activeContact.id] = resolve;
-            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: activeContact.id }));
-          }
-          setTimeout(() => {
-            if (pendingBundleRequests.current[activeContact.id]) {
-              delete pendingBundleRequests.current[activeContact.id];
-              resolve(null);
-            }
-          }, 5000); // 5 sec timeout
-        });
-
-        if (!bundle) throw new Error("Could not fetch prekeys");
-        
-        // Wait a tick for prefetch to finish calculating, or calculate ourselves if we initiated it
-        if (!sessionKeys.current[activeContact.id]) {
-          verifyPreKeyBundle(bundle, activeContact.ed25519Pub);
-          const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, activeContact.id);
-          const theirPub = base64ToBytes(bundle.signedPreKey.pub);
-          ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
-          ratchet.ekpub = sess.ephemeralX25519PubB64;
-          ratchet.kemct = sess.kemCiphertextB64;
-          ratchet.opkId = sess.opkId;
-          sessionKeys.current[activeContact.id] = ratchet;
-        } else {
-          ratchet = sessionKeys.current[activeContact.id];
-        }
-      }
-
-      // Check if this is the first message for this session where we need to attach handshake material
-      if (ratchet.ekpub && ratchet.kemct) {
-        ekpub = ratchet.ekpub;
-        kemct = ratchet.kemct;
-        opkId = ratchet.opkId;
-        // Do not delete them yet, keep them in case the first message is lost? 
-        // Signal attaches them to *every* message until a reply is received, but for now we'll just attach once
-        delete ratchet.ekpub;
-        delete ratchet.kemct;
-        delete ratchet.opkId;
-      }
-
-      const seq = Date.now(); // simple seq generator
+      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+      const seq = Date.now();
       const ts = Date.now();
-      
-      const ttl = vanishModes[activeContact.id] || 0;
-      
+
       const replyPayload = replyingTo ? {
         seq: replyingTo.seq,
         senderId: replyingTo.senderId,
@@ -839,77 +1261,76 @@ export default function ChatLayout({ keys, myId }) {
         hasAttachment: !!replyingTo.hasAttachment
       } : undefined;
 
-      // Include delivery token and reply context in plaintext payload
-      const innerPayload = JSON.stringify({
-         text: inputText,
-         attachment: attachmentMetadata || undefined,
-         deliveryToken: keys.profile.deliveryTokenB64,
-         replyTo: replyPayload
-      });
-      
-      const { header, iv, ct } = await ratchet.encryptMessage(innerPayload);
-
-      const { saveRatchetState } = await import('../crypto/keyStorage.js');
-      await saveRatchetState(activeContact.id, ratchet.serialize());
-
-      const envelope = {
-        v: 1, type: 'msg',
-        from: myId, to: activeContact.id, // we will strip from if sealed
-        seq, ts, iv, ct, rh: header, ttl
-      };
-      
-      if (ekpub && kemct) {
-        envelope.ekpub = ekpub;
-        envelope.kemct = kemct;
-        if (opkId) envelope.opkId = opkId;
-      }
-
-      let finalPayload = envelope;
-      if (activeContact.deliveryToken && mySenderCertRef.current) {
-        // Sealed Sender Flow!
-        const { sealMessage } = await import('../crypto/sealedSender.js');
-        
-        // Remove from entirely!
-        delete envelope.from;
-        
-        const sealedEnvelope = await sealMessage(
-           activeContact.x25519Pub,
-           mySenderCertRef.current,
-           JSON.stringify(envelope) // The inner ratchet msg is the inner payload
-        );
-        
-        finalPayload = {
-          type: 'sealed_msg',
-          to: activeContact.id,
-          ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
-          envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
-          mac: sealedEnvelope.mac,
-          iv: sealedEnvelope.iv,
-          deliveryToken: activeContact.deliveryToken
+      if (activeContact) {
+        const ttl = vanishModes[activeContact.id] || 0;
+        const innerPayload = {
+          text: inputText,
+          attachment: attachmentMetadata || undefined,
+          deliveryToken: keys.profile.deliveryTokenB64,
+          replyTo: replyPayload,
+          senderName: myDisplayName
         };
+
+        await encryptAndSendToPeer(activeContact, innerPayload, ttl);
+
+        const msgObj = {
+          contactId: activeContact.id,
+          fromMe: true,
+          text: inputText,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload,
+          reactions: {},
+          ts,
+          seq,
+          status: 'sending',
+          ttl
+        };
+        await saveMessage(msgObj);
+        setMessages(prev => [...prev, msgObj]);
+      } else if (activeGroup) {
+        const group = activeGroup;
+        const ttl = vanishModes[group.id] || 0;
+        const innerPayload = {
+          groupId: group.id,
+          groupName: group.name,
+          senderId: myId,
+          senderName: myDisplayName,
+          senderX25519Pub: keys.x25519.publicKeyB64,
+          senderEd25519Pub: keys.ed25519.publicKeyB64,
+          text: inputText,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload
+        };
+
+        const otherMembers = (group.members || []).filter(m => m.id !== myId);
+        for (const member of otherMembers) {
+          try {
+            const target = contacts.find(c => c.id === member.id) || member;
+            await encryptAndSendToPeer(target, innerPayload, ttl);
+          } catch (err) {
+            console.warn(`[VEIL] Fan-out error to ${member.name}:`, err);
+          }
+        }
+
+        const msgObj = {
+          contactId: group.id,
+          groupId: group.id,
+          fromMe: true,
+          senderId: myId,
+          senderName: myDisplayName,
+          text: inputText,
+          attachment: attachmentMetadata || undefined,
+          replyTo: replyPayload,
+          reactions: {},
+          ts,
+          seq,
+          status: 'delivered',
+          ttl
+        };
+        await saveMessage(msgObj);
+        setMessages(prev => [...prev, msgObj]);
       }
-      
-      if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify(finalPayload));
-      } else {
-        const { saveToOutbox } = await import('../storage/db.js');
-        await saveToOutbox(finalPayload);
-      }
-      
-      const msgObj = { 
-        contactId: activeContact.id, 
-        fromMe: true, 
-        text: inputText, 
-        attachment: attachmentMetadata || undefined,
-        replyTo: replyPayload,
-        reactions: {},
-        ts, 
-        seq, 
-        status: 'sending', 
-        ttl 
-      };
-      await saveMessage(msgObj);
-      setMessages(prev => [...prev, msgObj]);
+
       setInputText('');
       setStagedAttachment(null);
       setReplyingTo(null);
@@ -920,7 +1341,11 @@ export default function ChatLayout({ keys, myId }) {
   };
 
   const handleToggleReaction = async (targetSeq, emoji) => {
-    if (!activeContact) return;
+    const targetChat = activeContact || activeGroup;
+    if (!targetChat) return;
+
+    const chatId = targetChat.id;
+    const isGroup = !!activeGroup;
 
     let nextReactions = {};
     setMessages(prev => prev.map(m => {
@@ -929,9 +1354,7 @@ export default function ChatLayout({ keys, myId }) {
         const curUsers = curReactions[emoji] || [];
         if (curUsers.includes(myId)) {
           curReactions[emoji] = curUsers.filter(id => id !== myId);
-          if (curReactions[emoji].length === 0) {
-            delete curReactions[emoji];
-          }
+          if (curReactions[emoji].length === 0) delete curReactions[emoji];
         } else {
           curReactions[emoji] = [...curUsers, myId];
         }
@@ -943,106 +1366,31 @@ export default function ChatLayout({ keys, myId }) {
 
     setActiveReactionSeq(null);
 
-    await updateMessageReactions(activeContact.id, targetSeq, nextReactions).catch(console.error);
+    await updateMessageReactions(chatId, targetSeq, nextReactions).catch(console.error);
 
     try {
-      let ratchet = sessionKeys.current[activeContact.id];
-      if (!ratchet) {
-        const bundle = await new Promise((resolve) => {
-          if (pendingBundleRequests.current[activeContact.id]) {
-            const existing = pendingBundleRequests.current[activeContact.id];
-            pendingBundleRequests.current[activeContact.id] = (b) => {
-              existing(b);
-              resolve(b);
-            };
-          } else {
-            pendingBundleRequests.current[activeContact.id] = resolve;
-            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: activeContact.id }));
-          }
-          setTimeout(() => {
-            if (pendingBundleRequests.current[activeContact.id]) {
-              delete pendingBundleRequests.current[activeContact.id];
-              resolve(null);
-            }
-          }, 5000);
-        });
-        if (!bundle) return;
-        if (!sessionKeys.current[activeContact.id]) {
-          verifyPreKeyBundle(bundle, activeContact.ed25519Pub);
-          const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, activeContact.id);
-          const theirPub = base64ToBytes(bundle.signedPreKey.pub);
-          ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
-          ratchet.ekpub = sess.ephemeralX25519PubB64;
-          ratchet.kemct = sess.kemCiphertextB64;
-          ratchet.opkId = sess.opkId;
-          sessionKeys.current[activeContact.id] = ratchet;
-        } else {
-          ratchet = sessionKeys.current[activeContact.id];
-        }
-      }
-
-      let ekpub = undefined, kemct = undefined, opkId = undefined;
-      if (ratchet.ekpub && ratchet.kemct) {
-        ekpub = ratchet.ekpub;
-        kemct = ratchet.kemct;
-        opkId = ratchet.opkId;
-        delete ratchet.ekpub;
-        delete ratchet.kemct;
-        delete ratchet.opkId;
-      }
-
-      const seq = Date.now();
-      const ts = Date.now();
-
-      const innerPayload = JSON.stringify({
-        action: 'reaction',
-        targetSeq,
-        emoji,
-        deliveryToken: keys.profile.deliveryTokenB64
-      });
-
-      const { header, iv, ct } = await ratchet.encryptMessage(innerPayload);
-
-      const { saveRatchetState } = await import('../crypto/keyStorage.js');
-      await saveRatchetState(activeContact.id, ratchet.serialize());
-
-      const envelope = {
-        v: 1, type: 'msg',
-        from: myId, to: activeContact.id,
-        seq, ts, iv, ct, rh: header, ttl: 0
-      };
-
-      if (ekpub && kemct) {
-        envelope.ekpub = ekpub;
-        envelope.kemct = kemct;
-        if (opkId) envelope.opkId = opkId;
-      }
-
-      let finalPayload = envelope;
-      if (activeContact.deliveryToken && mySenderCertRef.current) {
-        const { sealMessage } = await import('../crypto/sealedSender.js');
-        delete envelope.from;
-        const sealedEnvelope = await sealMessage(
-          activeContact.x25519Pub,
-          mySenderCertRef.current,
-          JSON.stringify(envelope)
-        );
-        finalPayload = {
-          type: 'sealed_msg',
-          to: activeContact.id,
-          ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
-          envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
-          mac: sealedEnvelope.mac,
-          iv: sealedEnvelope.iv,
-          deliveryToken: activeContact.deliveryToken
+      if (isGroup) {
+        const reactionPayload = {
+          action: 'reaction',
+          groupId: targetChat.id,
+          targetSeq,
+          emoji,
+          senderId: myId
         };
-      }
-
-      if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify(finalPayload));
+        for (const member of (targetChat.members || []).filter(m => m.id !== myId)) {
+          try {
+            const target = contacts.find(c => c.id === member.id) || member;
+            await encryptAndSendToPeer(target, reactionPayload, 0);
+          } catch (e) {}
+        }
       } else {
-        const { saveToOutbox } = await import('../storage/db.js');
-        await saveToOutbox(finalPayload);
+        const reactionPayload = {
+          action: 'reaction',
+          targetSeq,
+          emoji,
+          deliveryToken: keys.profile.deliveryTokenB64
+        };
+        await encryptAndSendToPeer(activeContact, reactionPayload, 0);
       }
     } catch (err) {
       console.error("[VEIL] Failed to send reaction:", err);
@@ -1052,7 +1400,7 @@ export default function ChatLayout({ keys, myId }) {
   return (
     <div className="flex-1 flex overflow-hidden p-2 md:p-4 gap-4">
       {/* Sidebar */}
-      <div className={`w-full md:w-80 bg-stark-surface border border-arc-cyan/20 flex-col shadow-glow-cyan ${activeContact ? 'hidden md:flex' : 'flex'}`} style={{clipPath: "polygon(0 0, 100% 0, 100% 100%, 5% 100%, 0 95%)"}}>
+      <div className={`w-full md:w-80 bg-stark-surface border border-arc-cyan/20 flex-col shadow-glow-cyan ${(activeContact || activeGroup) ? 'hidden md:flex' : 'flex'}`} style={{clipPath: "polygon(0 0, 100% 0, 100% 100%, 5% 100%, 0 95%)"}}>
         <div className="p-4 border-b border-arc-cyan/20 flex justify-between items-center bg-arc-cyan/5">
           <div>
             <h2 className="font-hud font-bold tracking-[0.2em] text-arc-cyan text-lg md:text-xl">PROJECT VEIL // QUANTUM RELAY</h2>
@@ -1074,115 +1422,276 @@ export default function ChatLayout({ keys, myId }) {
             </div>
             <div className="text-[10px] text-arc-cyan/50 font-mono mt-1 border border-arc-cyan/20 px-1 inline-block">ID: {myId.slice(0, 12)}...</div>
           </div>
-          <button onClick={() => setShowAddContact(true)} className="p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent hover:border-arc-cyan/30 rounded transition-colors">
-            <UserPlus size={22} />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button 
+              onClick={() => setShowCreateGroup(true)} 
+              className="p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30 hover:border-arc-cyan rounded transition-colors flex items-center gap-1"
+              title="Create New Encrypted Group"
+            >
+              <Users size={18} />
+              <Plus size={12} className="-ml-1 text-arc-cyan" />
+            </button>
+            <button 
+              onClick={() => setShowAddContact(true)} 
+              className="p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent hover:border-arc-cyan/30 rounded transition-colors"
+              title="Add Friend by Cipher ID"
+            >
+              <UserPlus size={20} />
+            </button>
+          </div>
         </div>
         
-        {/* Friends List Header */}
-        <div className="px-4 py-3 border-b border-arc-cyan/10 bg-arc-cyan/5">
-          <div className="text-sm font-hud tracking-[0.2em] text-arc-cyan/70 uppercase">FRIENDS REGISTERED</div>
+        {/* Navigation Tabs: ALL / DIRECT / GROUPS */}
+        <div className="flex border-b border-arc-cyan/20 bg-black/40 text-[10px] font-hud tracking-wider">
+          <button
+            onClick={() => setActiveTab('all')}
+            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+              activeTab === 'all'
+                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            ALL ({contacts.length + groups.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('direct')}
+            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+              activeTab === 'direct'
+                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            DIRECT ({contacts.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('groups')}
+            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+              activeTab === 'groups'
+                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            GROUPS ({groups.length})
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {contacts.length === 0 ? (
+          {contacts.length === 0 && groups.length === 0 ? (
             <div className="p-6 text-center flex flex-col items-center justify-center h-full opacity-50">
               <UserPlus size={32} className="text-arc-cyan mb-3" />
-              <div className="font-hud tracking-widest text-[10px] text-arc-cyan">NO FRIENDS ADDED</div>
-              <div className="font-mono text-[9px] text-arc-cyan mt-2">Click [+] to add a friend</div>
+              <div className="font-hud tracking-widest text-[10px] text-arc-cyan">NO CHANNELS FOUND</div>
+              <div className="font-mono text-[9px] text-arc-cyan mt-2">Add a friend or create a group to start</div>
             </div>
           ) : (
-            contacts.map(c => (
-              <button 
-                key={c.id} 
-                onClick={() => setActiveContact(c)}
-                className={`w-full p-4 text-left border-b border-arc-cyan/10 hover:bg-arc-cyan/5 flex items-center justify-between transition-all ${activeContact?.id === c.id ? 'bg-arc-cyan/10 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.1)]' : ''}`}
-              >
-                <div>
-                  <div className="font-hud tracking-widest font-bold text-white text-sm">{c.name}</div>
-                  <div className="text-[10px] text-arc-cyan/50 font-mono mt-1">{c.id.slice(0, 9)}...</div>
-                </div>
-                {c.verified ? (
-                  <div className="flex flex-col items-end">
-                    <ShieldCheck size={14} className="text-arc-cyan" />
-                    <span className="text-[8px] font-mono text-arc-cyan mt-1">PQ-OK</span>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-end">
-                    <ShieldAlert size={14} className="text-stark-gold" />
-                    <span className="text-[8px] font-mono text-stark-gold mt-1 animate-pulse">UNVERIFIED</span>
-                  </div>
-                )}
-              </button>
-            ))
+            <>
+              {/* Groups List (if in 'all' or 'groups' tab) */}
+              {(activeTab === 'all' || activeTab === 'groups') && groups.length > 0 && (
+                <>
+                  {activeTab === 'all' && (
+                    <div className="px-4 py-1.5 bg-arc-cyan/5 border-b border-arc-cyan/10 text-[9px] font-hud tracking-widest text-arc-cyan/70 uppercase flex items-center justify-between">
+                      <span>GROUPS ({groups.length})</span>
+                      <button 
+                        onClick={() => setShowCreateGroup(true)}
+                        className="text-[9px] text-arc-cyan hover:underline flex items-center gap-0.5"
+                      >
+                        <Plus size={10} /> NEW
+                      </button>
+                    </div>
+                  )}
+                  {groups.map(g => {
+                    const isSelected = activeGroup?.id === g.id;
+                    return (
+                      <button
+                        key={g.id}
+                        onClick={() => {
+                          setActiveContact(null);
+                          setActiveGroup(g);
+                        }}
+                        className={`w-full p-3.5 text-left border-b border-arc-cyan/10 hover:bg-arc-cyan/5 flex items-center justify-between transition-all ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`}
+                      >
+                        <div className="flex items-center gap-3 truncate">
+                          <div className="w-8 h-8 rounded bg-arc-cyan/10 border border-arc-cyan/40 flex items-center justify-center text-arc-cyan shrink-0">
+                            <Users size={16} />
+                          </div>
+                          <div className="truncate">
+                            <div className="font-hud tracking-wider font-bold text-white text-sm truncate">{g.name}</div>
+                            <div className="text-[10px] text-arc-cyan/60 font-mono truncate">
+                              {g.members?.length || 1} members // ENCRYPTED
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-[8px] font-mono text-arc-cyan border border-arc-cyan/30 px-1.5 py-0.5 rounded uppercase shrink-0">
+                          GROUP
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+
+              {/* Direct Contacts List (if in 'all' or 'direct' tab) */}
+              {(activeTab === 'all' || activeTab === 'direct') && (
+                <>
+                  {activeTab === 'all' && groups.length > 0 && contacts.length > 0 && (
+                    <div className="px-4 py-1.5 bg-arc-cyan/5 border-b border-arc-cyan/10 text-[9px] font-hud tracking-widest text-arc-cyan/70 uppercase">
+                      DIRECT CONTACTS ({contacts.length})
+                    </div>
+                  )}
+                  {contacts.map(c => {
+                    const isSelected = activeContact?.id === c.id;
+                    return (
+                      <button 
+                        key={c.id} 
+                        onClick={() => {
+                          setActiveGroup(null);
+                          setActiveContact(c);
+                        }}
+                        className={`w-full p-3.5 text-left border-b border-arc-cyan/10 hover:bg-arc-cyan/5 flex items-center justify-between transition-all ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`}
+                      >
+                        <div>
+                          <div className="font-hud tracking-widest font-bold text-white text-sm">{c.name}</div>
+                          <div className="text-[10px] text-arc-cyan/50 font-mono mt-0.5">{c.id.slice(0, 9)}...</div>
+                        </div>
+                        {c.verified ? (
+                          <div className="flex flex-col items-end">
+                            <ShieldCheck size={14} className="text-arc-cyan" />
+                            <span className="text-[8px] font-mono text-arc-cyan mt-1">PQ-OK</span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-end">
+                            <ShieldAlert size={14} className="text-stark-gold" />
+                            <span className="text-[8px] font-mono text-stark-gold mt-1 animate-pulse">UNVERIFIED</span>
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </>
           )}
         </div>
       </div>
 
       {/* Chat Area */}
-      {activeContact ? (
+      {(activeContact || activeGroup) ? (
         <div className="flex-1 flex flex-col bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan overflow-hidden" style={{clipPath: "polygon(0 5%, 5% 0, 100% 0, 100% 100%, 0 100%)"}}>
           {/* Header */}
           <div className="p-2 md:p-4 border-b border-arc-cyan/20 flex justify-between items-center bg-stark-bg/80 backdrop-blur-md">
-            <div className="flex items-center gap-2 md:gap-3">
-              <button onClick={() => setActiveContact(null)} className="md:hidden p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent rounded transition-colors">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-              </button>
-              <div>
-                <div className="font-hud tracking-widest font-bold text-base md:text-lg text-white">{activeContact.name}</div>
-                <div className="hidden md:inline-block text-[10px] text-arc-cyan/70 font-mono mt-1 border border-arc-cyan/20 px-1">TARGET: {activeContact.id}</div>
-                <div className="hidden md:inline-block text-[10px] text-arc-cyan/50 font-mono ml-2">[HYBRID: ML-KEM + X25519]</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="relative">
-                <button 
-                  onClick={() => setShowVanishMenu(!showVanishMenu)}
-                  className={`px-2 py-1 md:px-3 md:py-2 border text-[9px] md:text-[10px] font-mono tracking-widest transition-all ${
-                    (vanishModes[activeContact.id] || 0) > 0 
-                      ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold' 
-                      : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan'
-                  }`}
-                >
-                  {(vanishModes[activeContact.id] || 0) === 0 ? 'VANISH: OFF' : 
-                   (vanishModes[activeContact.id] === 5000) ? 'VANISH: 5s' : 
-                   (vanishModes[activeContact.id] === 60000) ? 'VANISH: 1m' : 'VANISH: 1h'}
-                </button>
-                {showVanishMenu && (
-                  <div className="absolute top-full right-0 mt-1 w-32 bg-stark-bg border border-arc-cyan shadow-glow-cyan z-50 flex flex-col">
-                    {[
-                      { label: 'OFF', value: 0 },
-                      { label: '5 SECONDS', value: 5000 },
-                      { label: '1 MINUTE', value: 60000 },
-                      { label: '1 HOUR', value: 3600000 }
-                    ].map(opt => (
-                      <button
-                        key={opt.value}
-                        onClick={() => {
-                          const ttl = opt.value;
-                          setVanishModes(prev => ({ ...prev, [activeContact.id]: ttl }));
-                          if (ws.current?.readyState === WebSocket.OPEN) {
-                            ws.current.send(JSON.stringify({ type: 'vanish_mode', from: myId, to: activeContact.id, ttl }));
-                          }
-                          setShowVanishMenu(false);
-                        }}
-                        className={`text-left px-3 py-2 text-[10px] font-mono tracking-wider transition-colors ${
-                          (vanishModes[activeContact.id] || 0) === opt.value 
-                            ? 'bg-arc-cyan text-stark-bg font-bold' 
-                            : 'text-arc-cyan hover:bg-arc-cyan/20'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
+            {activeGroup ? (
+              <>
+                <div className="flex items-center gap-2 md:gap-3">
+                  <button onClick={() => setActiveGroup(null)} className="md:hidden p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent rounded transition-colors">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+                  <div className="w-9 h-9 rounded bg-arc-cyan/15 border border-arc-cyan/40 flex items-center justify-center text-arc-cyan shrink-0">
+                    <Users size={20} />
                   </div>
-                )}
-              </div>
-              <button onClick={() => setShowSafetyNumber(true)} className={`px-2 py-1 md:px-4 md:py-2 rounded-sm border transition-all text-[10px] md:text-xs font-hud tracking-[0.1em] flex items-center gap-1 md:gap-2 ${activeContact.verified ? 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan' : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'}`}>
-                {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-                <span className="hidden md:inline">{activeContact.verified ? 'LINK SECURED' : 'AUTHENTICATE'}</span>
-              </button>
-            </div>
+                  <div>
+                    <div className="font-hud tracking-widest font-bold text-base md:text-lg text-white flex items-center gap-2">
+                      <span>{activeGroup.name}</span>
+                      <span className="text-[9px] font-mono text-arc-cyan border border-arc-cyan/30 px-1.5 py-0.2 rounded uppercase">E2EE GROUP</span>
+                    </div>
+                    <div className="text-[10px] text-arc-cyan/70 font-mono mt-0.5">
+                      {activeGroup.members?.length || 1} PARTICIPANTS • ZERO-KNOWLEDGE MULTI-PARTY
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      const invitePayload = btoa(unescape(encodeURIComponent(JSON.stringify({
+                        id: activeGroup.id,
+                        name: activeGroup.name,
+                        createdBy: activeGroup.createdBy
+                      }))));
+                      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://veil-relay.onrender.com';
+                      const inviteUrl = `${origin}/?joinGroup=${invitePayload}`;
+                      navigator.clipboard.writeText(inviteUrl).then(() => {
+                        showToast("Group invite link copied to clipboard!");
+                      }).catch(() => {
+                        prompt("Group Invite Link:", inviteUrl);
+                      });
+                    }}
+                    className="px-2.5 py-1 md:px-3 md:py-2 border border-arc-cyan/40 bg-arc-cyan/10 text-arc-cyan hover:bg-arc-cyan/20 text-[10px] md:text-xs font-hud tracking-wider flex items-center gap-1.5 transition-all shadow-glow-cyan"
+                    title="Copy Shareable Invite Link"
+                  >
+                    <Share2 size={13} />
+                    <span className="hidden md:inline">INVITE LINK</span>
+                  </button>
+                  <button
+                    onClick={() => setShowGroupInfo(true)}
+                    className="px-2.5 py-1 md:px-3 md:py-2 border border-arc-cyan/40 bg-stark-bg text-arc-cyan hover:border-arc-cyan text-[10px] md:text-xs font-hud tracking-wider flex items-center gap-1.5 transition-all"
+                    title="View Group Info & Members"
+                  >
+                    <Info size={13} />
+                    <span className="hidden md:inline">MEMBERS</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 md:gap-3">
+                  <button onClick={() => setActiveContact(null)} className="md:hidden p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent rounded transition-colors">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+                  <div>
+                    <div className="font-hud tracking-widest font-bold text-base md:text-lg text-white">{activeContact.name}</div>
+                    <div className="hidden md:inline-block text-[10px] text-arc-cyan/70 font-mono mt-1 border border-arc-cyan/20 px-1">TARGET: {activeContact.id}</div>
+                    <div className="hidden md:inline-block text-[10px] text-arc-cyan/50 font-mono ml-2">[HYBRID: ML-KEM + X25519]</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <button 
+                      onClick={() => setShowVanishMenu(!showVanishMenu)}
+                      className={`px-2 py-1 md:px-3 md:py-2 border text-[9px] md:text-[10px] font-mono tracking-widest transition-all ${
+                        (vanishModes[activeContact.id] || 0) > 0 
+                          ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold' 
+                          : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan'
+                      }`}
+                    >
+                      {(vanishModes[activeContact.id] || 0) === 0 ? 'VANISH: OFF' : 
+                       (vanishModes[activeContact.id] === 5000) ? 'VANISH: 5s' : 
+                       (vanishModes[activeContact.id] === 60000) ? 'VANISH: 1m' : 'VANISH: 1h'}
+                    </button>
+                    {showVanishMenu && (
+                      <div className="absolute top-full right-0 mt-1 w-32 bg-stark-bg border border-arc-cyan shadow-glow-cyan z-50 flex flex-col">
+                        {[
+                          { label: 'OFF', value: 0 },
+                          { label: '5 SECONDS', value: 5000 },
+                          { label: '1 MINUTE', value: 60000 },
+                          { label: '1 HOUR', value: 3600000 }
+                        ].map(opt => (
+                          <button
+                            key={opt.value}
+                            onClick={() => {
+                              const ttl = opt.value;
+                              setVanishModes(prev => ({ ...prev, [activeContact.id]: ttl }));
+                              if (ws.current?.readyState === WebSocket.OPEN) {
+                                ws.current.send(JSON.stringify({ type: 'vanish_mode', from: myId, to: activeContact.id, ttl }));
+                              }
+                              setShowVanishMenu(false);
+                            }}
+                            className={`text-left px-3 py-2 text-[10px] font-mono tracking-wider transition-colors ${
+                              (vanishModes[activeContact.id] || 0) === opt.value 
+                                ? 'bg-arc-cyan text-stark-bg font-bold' 
+                                : 'text-arc-cyan hover:bg-arc-cyan/20'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => setShowSafetyNumber(true)} className={`px-2 py-1 md:px-4 md:py-2 rounded-sm border transition-all text-[10px] md:text-xs font-hud tracking-[0.1em] flex items-center gap-1 md:gap-2 ${activeContact.verified ? 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan' : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'}`}>
+                    {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
+                    <span className="hidden md:inline">{activeContact.verified ? 'LINK SECURED' : 'AUTHENTICATE'}</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Messages */}
@@ -1250,6 +1759,34 @@ export default function ChatLayout({ keys, myId }) {
                   >
                     <CornerUpLeft size={12} />
                   </button>
+
+                  {/* Group Sender Attribution with 1-click [+ ADD FRIEND] button */}
+                  {activeGroup && !m.fromMe && (
+                    <div className="flex items-center justify-between gap-2 mb-2 pb-1 border-b border-arc-cyan/15">
+                      <div className="flex items-center gap-1 font-hud text-[11px] text-arc-cyan font-bold tracking-wider">
+                        <span>{m.senderName || `AGENT-${(m.senderId || '').slice(0, 4)}`}</span>
+                      </div>
+                      {/* If sender is NOT ourself and NOT in our contacts list, show [+ ADD FRIEND] */}
+                      {m.senderId && m.senderId !== myId && !contacts.some(c => c.id === m.senderId) && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleAddFriendFromGroup({
+                              id: m.senderId,
+                              name: m.senderName || `Agent-${m.senderId.slice(0, 4)}`,
+                              x25519Pub: m.senderX25519Pub,
+                              ed25519Pub: m.senderEd25519Pub
+                            });
+                          }}
+                          className="text-[9px] font-mono tracking-wider text-stark-gold hover:text-white bg-stark-gold/15 hover:bg-stark-gold/30 border border-stark-gold/50 px-2 py-0.5 rounded flex items-center gap-1 transition-all shadow-glow-gold"
+                          title="Add user to direct friends list"
+                        >
+                          <Plus size={10} /> ADD FRIEND
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                 {/* Quoted Message Citation */}
                 {m.replyTo && (
@@ -1413,13 +1950,15 @@ export default function ChatLayout({ keys, myId }) {
           ))}
             
             {/* Typing Indicator */}
-            {typingUsers[activeContact.id] && (
+            {((activeContact && typingUsers[activeContact.id]) || (activeGroup && Object.entries(typingUsers).some(([uid, t]) => t && uid !== myId && activeGroup.members?.some(m => m.id === uid)))) && (
               <div className="bg-stark-card border-l-2 border-arc-cyan/50 mr-auto p-3 rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg animate-pulse max-w-[80%]">
                 <div className="font-mono text-[10px] text-arc-cyan flex items-center gap-2">
                   <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '0ms'}}/>
                   <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '150ms'}}/>
                   <span className="w-1.5 h-1.5 bg-arc-cyan rounded-full animate-bounce" style={{animationDelay: '300ms'}}/>
-                  <span className="ml-2 uppercase tracking-widest">TRANSMITTING...</span>
+                  <span className="ml-2 uppercase tracking-widest">
+                    {activeGroup ? 'GROUP TRANSMITTING...' : 'TRANSMITTING...'}
+                  </span>
                 </div>
               </div>
             )}
@@ -1500,16 +2039,21 @@ export default function ChatLayout({ keys, myId }) {
                   value={inputText}
                   onChange={e => {
                     setInputText(e.target.value);
-                    if (ws.current?.readyState === WebSocket.OPEN && activeContact) {
-                      // Throttle typing indicators
+                    if (ws.current?.readyState === WebSocket.OPEN) {
                       if (!window.lastTypingTime || Date.now() - window.lastTypingTime > 1500) {
                         window.lastTypingTime = Date.now();
-                        ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: activeContact.id }));
+                        if (activeContact) {
+                          ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: activeContact.id }));
+                        } else if (activeGroup) {
+                          for (const m of (activeGroup.members || []).filter(x => x.id !== myId)) {
+                            ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: m.id }));
+                          }
+                        }
                       }
                     }
                   }}
                   className="flex-1 bg-stark-surface border border-arc-cyan/30 p-2 md:p-3 font-mono text-xs text-arc-cyan placeholder:text-arc-cyan/30 focus:outline-none focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50 transition-all"
-                  placeholder={uploadingAttachment ? "Encrypting & uploading attachment..." : "> Enter transmission or attach file..."}
+                  placeholder={uploadingAttachment ? "Encrypting & uploading attachment..." : (activeGroup ? `> Transmit to "${activeGroup.name}"...` : "> Enter transmission or attach file...")}
                   maxLength={8000}
                 />
                 <button 
@@ -1526,8 +2070,8 @@ export default function ChatLayout({ keys, myId }) {
       ) : (
         <div className="hidden md:flex flex-1 flex-col items-center justify-center text-arc-cyan/30 border border-arc-cyan/10 bg-stark-surface" style={{clipPath: "polygon(0 5%, 5% 0, 100% 0, 100% 100%, 0 100%)"}}>
           <ShieldCheck size={48} className="mb-4 opacity-20" />
-          <div className="font-hud tracking-[0.3em] text-sm">NO ACTIVE UPLINK</div>
-          <div className="font-mono text-[10px] mt-2 opacity-50">Select target node to establish quantum relay</div>
+          <div className="font-hud tracking-[0.3em] text-sm">NO ACTIVE TRANSMISSION</div>
+          <div className="font-mono text-[10px] mt-2 opacity-50">Select a friend or encrypted group to establish quantum uplink</div>
         </div>
       )}
 
@@ -1542,6 +2086,47 @@ export default function ChatLayout({ keys, myId }) {
             setShowAddContact(false);
           }}
         />
+      )}
+
+      {showCreateGroup && (
+        <CreateGroupModal 
+          contacts={contacts} 
+          myId={myId}
+          onClose={() => setShowCreateGroup(false)}
+          onCreateGroup={handleCreateGroup}
+        />
+      )}
+
+      {showGroupInfo && activeGroup && (
+        <GroupInfoModal 
+          group={activeGroup} 
+          contacts={contacts} 
+          myId={myId}
+          onClose={() => setShowGroupInfo(false)}
+          onAddMembers={handleAddMembersToGroup}
+          onAddFriendFromGroup={handleAddFriendFromGroup}
+          onDirectMessage={(contact) => {
+            setShowGroupInfo(false);
+            setActiveGroup(null);
+            setActiveContact(contact);
+          }}
+          onLeaveGroup={handleLeaveGroup}
+        />
+      )}
+
+      {incomingInvite && (
+        <JoinGroupModal 
+          inviteData={incomingInvite}
+          onConfirmJoin={handleConfirmJoinGroup}
+          onDecline={() => setIncomingInvite(null)}
+        />
+      )}
+
+      {toastMessage && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-stark-bg/95 border border-arc-cyan text-arc-cyan px-4 py-2 rounded-full font-mono text-xs shadow-glow-cyan flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
+          <div className="w-2 h-2 rounded-full bg-arc-cyan animate-ping" />
+          <span>{toastMessage}</span>
+        </div>
       )}
       
       {showSafetyNumber && activeContact && (

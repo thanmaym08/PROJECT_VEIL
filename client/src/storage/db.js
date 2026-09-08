@@ -1,6 +1,6 @@
 export function getDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open("veil_data", 2);
+    const req = indexedDB.open("veil_data", 3);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains("contacts")) {
@@ -13,9 +13,69 @@ export function getDB() {
       if (!db.objectStoreNames.contains("prekeys")) {
         db.createObjectStore("prekeys"); // key-value store for local private prekeys
       }
+      if (!db.objectStoreNames.contains("groups")) {
+        db.createObjectStore("groups", { keyPath: "id" });
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+export async function getGroups() {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    if (!db.objectStoreNames.contains("groups")) return resolve([]);
+    const tx = db.transaction("groups", "readonly");
+    const req = tx.objectStore("groups").getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+export async function saveGroup(group) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("groups", "readwrite");
+    tx.objectStore("groups").put(group);
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+export async function deleteGroup(groupId) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const stores = ["groups"];
+    if (db.objectStoreNames.contains("messages")) stores.push("messages");
+    const tx = db.transaction(stores, "readwrite");
+    tx.objectStore("groups").delete(groupId);
+    
+    if (db.objectStoreNames.contains("messages")) {
+      const msgStore = tx.objectStore("messages");
+      const index = msgStore.index("contactId");
+      const req = index.openCursor(IDBKeyRange.only(groupId));
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+export async function getGroup(groupId) {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    if (!db.objectStoreNames.contains("groups")) return resolve(null);
+    const tx = db.transaction("groups", "readonly");
+    const req = tx.objectStore("groups").get(groupId);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
   });
 }
 

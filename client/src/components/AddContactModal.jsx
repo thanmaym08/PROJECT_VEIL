@@ -10,6 +10,7 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
   const [name, setName] = useState('');
   const [copied, setCopied] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isStartingCamera, setIsStartingCamera] = useState(false);
   const [isDecoding, setIsDecoding] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [detectedTarget, setDetectedTarget] = useState(null);
@@ -55,19 +56,56 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     }
   };
 
+  const requestCameraPermission = async () => {
+    if (typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      throw new Error("Camera requires a secure HTTPS connection. Please use 'SCAN FROM PHOTO' or visit via HTTPS.");
+    }
+
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      throw new Error("Camera video capture is not supported in this browser. Please use 'SCAN FROM PHOTO' instead.");
+    }
+
+    // Explicitly prompts browser/Android OS for camera permission!
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } }
+    });
+
+    // Immediately release the test stream so Html5Qrcode gets exclusive hardware access
+    stream.getTracks().forEach(track => track.stop());
+    return true;
+  };
+
   const startCamera = async () => {
     setErrorMessage(null);
+    setIsStartingCamera(true);
+
     try {
       if (html5QrCodeRef.current) {
         await stopCamera();
       }
-      const html5QrCode = new Html5Qrcode("camera-reader");
-      html5QrCodeRef.current = html5QrCode;
+
+      // Step 1: Explicitly trigger the browser's native camera permission dialog
+      await requestCameraPermission();
+
+      // Step 2: Show the reader viewport
       setIsCameraActive(true);
 
+      // Step 3: Wait a tick for the DOM element to be ready
+      await new Promise(resolve => setTimeout(resolve, 80));
+
+      const html5QrCode = new Html5Qrcode("camera-reader");
+      html5QrCodeRef.current = html5QrCode;
+
       await html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 220, height: 220 } },
+        { facingMode: { ideal: "environment" } },
+        { 
+          fps: 15, 
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const qrEdge = Math.max(180, Math.floor(minEdge * 0.75));
+            return { width: qrEdge, height: qrEdge };
+          }
+        },
         (decodedText) => {
           handleParsedQR(decodedText);
           stopCamera();
@@ -77,7 +115,16 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     } catch (err) {
       console.warn("Camera start failed:", err);
       setIsCameraActive(false);
-      setErrorMessage("Camera access unavailable or denied. Use the 'Scan from Photo' button below to select a QR screenshot.");
+
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setErrorMessage("Camera permission was denied. Please tap the lock icon 🔒 next to the website address to allow camera access, or use 'SCAN FROM PHOTO' below.");
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setErrorMessage("No physical camera detected on this device. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
+      } else {
+        setErrorMessage(err.message || "Failed to access camera. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
+      }
+    } finally {
+      setIsStartingCamera(false);
     }
   };
 
@@ -409,29 +456,28 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
                     <button
                       type="button"
                       onClick={isCameraActive ? stopCamera : startCamera}
-                      className={`p-3.5 border text-xs font-hud font-bold tracking-wider flex flex-col items-center justify-center gap-2 transition-all ${isCameraActive ? 'bg-stark-crimson/20 border-stark-crimson text-stark-crimson shadow-glow-crimson' : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'}`}
+                      disabled={isStartingCamera}
+                      className={`p-3.5 border text-xs font-hud font-bold tracking-wider flex flex-col items-center justify-center gap-2 transition-all ${isCameraActive ? 'bg-stark-crimson/20 border-stark-crimson text-stark-crimson shadow-glow-crimson' : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'} disabled:opacity-50`}
                       style={{clipPath: "polygon(5% 0, 100% 0, 100% 100%, 0 100%)"}}
                     >
-                      <Camera size={22} />
-                      <span>{isCameraActive ? 'STOP CAMERA' : 'OPEN CAMERA'}</span>
-                      <span className="text-[9px] font-mono opacity-60">Scan live QR code</span>
+                      <Camera size={22} className={isStartingCamera ? 'animate-pulse text-arc-cyan' : ''} />
+                      <span>{isCameraActive ? 'STOP CAMERA' : (isStartingCamera ? 'REQUESTING PERMISSION...' : 'OPEN CAMERA')}</span>
+                      <span className="text-[9px] font-mono opacity-60">{isCameraActive ? 'Tap to close camera' : 'Prompt & scan live QR'}</span>
                     </button>
                   </div>
 
-                  {/* Camera Scanner Viewport (Visible only when camera active) */}
-                  {isCameraActive && (
-                    <div className="relative mt-2">
-                      <div id="camera-reader" className="w-full bg-black border-2 border-arc-cyan overflow-hidden relative min-h-[250px] shadow-glow-cyan" />
-                      {/* Cyber HUD Overlay */}
-                      <div className="absolute inset-0 pointer-events-none">
-                        <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-arc-cyan"></div>
-                        <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-arc-cyan"></div>
-                        <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-arc-cyan"></div>
-                        <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-arc-cyan"></div>
-                        <div className="absolute top-1/2 left-0 w-full h-[1px] bg-arc-cyan/50 shadow-glow-cyan animate-[scan_2s_ease-in-out_infinite]"></div>
-                      </div>
+                  {/* Camera Scanner Viewport (Always in DOM so Html5Qrcode never throws element-not-found) */}
+                  <div className={`relative mt-2 ${isCameraActive ? 'block' : 'hidden'}`}>
+                    <div id="camera-reader" className="w-full bg-black border-2 border-arc-cyan overflow-hidden relative min-h-[260px] shadow-glow-cyan" />
+                    {/* Cyber HUD Overlay */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-arc-cyan"></div>
+                      <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-arc-cyan"></div>
+                      <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-arc-cyan"></div>
+                      <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-arc-cyan"></div>
+                      <div className="absolute top-1/2 left-0 w-full h-[1px] bg-arc-cyan/50 shadow-glow-cyan animate-[scan_2s_ease-in-out_infinite]"></div>
                     </div>
-                  )}
+                  </div>
 
                   {/* Collapsible Manual JSON Import */}
                   <div className="pt-2 border-t border-arc-cyan/15">

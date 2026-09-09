@@ -2215,10 +2215,15 @@ export default function ChatLayout({ keys, myId }) {
           myId={myId} 
           keys={keys}
           onClose={() => setShowAddContact(false)}
-          onAdd={async (contact) => {
+          onAdd={async (contact, autoStartChat = false) => {
             await saveContact(contact);
             await loadContacts();
             setShowAddContact(false);
+            if (autoStartChat) {
+              setActiveGroup(null);
+              setActiveContact(contact);
+              showToast(`Uplink established with ${contact.name}!`);
+            }
           }}
         />
       )}

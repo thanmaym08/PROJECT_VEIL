@@ -11,6 +11,8 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
   const [copied, setCopied] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
+  const [availableCameras, setAvailableCameras] = useState([]);
+  const [cameraIndex, setCameraIndex] = useState(0);
   const [isDecoding, setIsDecoding] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [detectedTarget, setDetectedTarget] = useState(null);
@@ -56,26 +58,7 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
     }
   };
 
-  const requestCameraPermission = async () => {
-    if (typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      throw new Error("Camera requires a secure HTTPS connection. Please use 'SCAN FROM PHOTO' or visit via HTTPS.");
-    }
-
-    if (!navigator?.mediaDevices?.getUserMedia) {
-      throw new Error("Camera video capture is not supported in this browser. Please use 'SCAN FROM PHOTO' instead.");
-    }
-
-    // Explicitly prompts browser/Android OS for camera permission!
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } }
-    });
-
-    // Immediately release the test stream so Html5Qrcode gets exclusive hardware access
-    stream.getTracks().forEach(track => track.stop());
-    return true;
-  };
-
-  const startCamera = async () => {
+  const startCamera = async (specificCameraId = null) => {
     setErrorMessage(null);
     setIsStartingCamera(true);
 
@@ -84,48 +67,126 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
         await stopCamera();
       }
 
-      // Step 1: Explicitly trigger the browser's native camera permission dialog
-      await requestCameraPermission();
+      // Check secure context (HTTPS or localhost)
+      const isSecure = typeof window !== 'undefined' && 
+        (window.isSecureContext || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      if (!isSecure) {
+        throw new Error("Camera requires a secure HTTPS connection. Please use 'SCAN FROM PHOTO' or visit via HTTPS.");
+      }
 
-      // Step 2: Show the reader viewport
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        throw new Error("Camera video capture is not supported in this browser. Please use 'SCAN FROM PHOTO' instead.");
+      }
+
+      // 1. Query available cameras (this triggers the browser/OS camera permission prompt if not yet granted)
+      let cameras = availableCameras;
+      if (!cameras || cameras.length === 0) {
+        try {
+          cameras = await Html5Qrcode.getCameras();
+          if (cameras && cameras.length > 0) {
+            setAvailableCameras(cameras);
+          }
+        } catch (camErr) {
+          console.warn("getCameras error, falling back to default constraints:", camErr);
+        }
+      }
+
+      // 2. Select target camera: prefer back/rear camera on mobile devices
+      let cameraConfig;
+      if (specificCameraId) {
+        cameraConfig = specificCameraId;
+      } else if (cameras && cameras.length > 0) {
+        let chosenIdx = cameras.findIndex(c => {
+          const l = (c.label || '').toLowerCase();
+          return l.includes('back') || l.includes('rear') || l.includes('environment') || l.includes('facing back');
+        });
+        if (chosenIdx === -1) chosenIdx = 0;
+        setCameraIndex(chosenIdx);
+        cameraConfig = cameras[chosenIdx].id;
+      } else {
+        // Fallback to literal string facingMode constraint
+        cameraConfig = { facingMode: "environment" };
+      }
+
+      // 3. Make the reader viewport visible in DOM
       setIsCameraActive(true);
 
-      // Step 3: Wait a tick for the DOM element to be ready
-      await new Promise(resolve => setTimeout(resolve, 80));
+      // 4. Yield 150ms for DOM layout and hardware resource stabilization
+      await new Promise(resolve => setTimeout(resolve, 150));
 
       const html5QrCode = new Html5Qrcode("camera-reader");
       html5QrCodeRef.current = html5QrCode;
 
-      await html5QrCode.start(
-        { facingMode: { ideal: "environment" } },
-        { 
-          fps: 15, 
-          qrbox: (viewfinderWidth, viewfinderHeight) => {
-            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const qrEdge = Math.max(180, Math.floor(minEdge * 0.75));
-            return { width: qrEdge, height: qrEdge };
-          }
-        },
-        (decodedText) => {
-          handleParsedQR(decodedText);
-          stopCamera();
-        },
-        () => {} // Frame error ignore
-      );
+      const qrConfig = { 
+        fps: 15, 
+        qrbox: (viewfinderWidth, viewfinderHeight) => {
+          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+          const qrEdge = Math.max(180, Math.floor(minEdge * 0.75));
+          return { width: qrEdge, height: qrEdge };
+        }
+      };
+
+      const handleSuccess = (decodedText) => {
+        handleParsedQR(decodedText);
+        stopCamera();
+      };
+
+      try {
+        await html5QrCode.start(
+          cameraConfig,
+          qrConfig,
+          handleSuccess,
+          () => {} // Frame error ignore
+        );
+      } catch (firstErr) {
+        // If back camera failed (e.g. laptop or desktop webcam without environment facingMode), retry with user camera or cameras[0]
+        if (typeof cameraConfig === 'object' && cameraConfig.facingMode === 'environment') {
+          console.warn("Environment camera failed, retrying with user facingMode...", firstErr);
+          await html5QrCode.start(
+            { facingMode: "user" },
+            qrConfig,
+            handleSuccess,
+            () => {}
+          );
+        } else if (cameras && cameras.length > 0 && cameraConfig !== cameras[0].id) {
+          console.warn("Selected camera failed, retrying with default device...", firstErr);
+          setCameraIndex(0);
+          await html5QrCode.start(
+            cameras[0].id,
+            qrConfig,
+            handleSuccess,
+            () => {}
+          );
+        } else {
+          throw firstErr;
+        }
+      }
     } catch (err) {
       console.warn("Camera start failed:", err);
       setIsCameraActive(false);
 
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      const errMsg = typeof err === 'string' ? err : (err?.message || '');
+      const errName = err?.name || '';
+
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError' || errMsg.toLowerCase().includes('denied') || errMsg.toLowerCase().includes('permission')) {
         setErrorMessage("Camera permission was denied. Please tap the lock icon 🔒 next to the website address to allow camera access, or use 'SCAN FROM PHOTO' below.");
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+      } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError' || errMsg.toLowerCase().includes('not found') || errMsg.toLowerCase().includes('no camera')) {
         setErrorMessage("No physical camera detected on this device. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
+      } else if (errName === 'NotReadableError' || errName === 'TrackStartError' || errMsg.toLowerCase().includes('in use') || errMsg.toLowerCase().includes('busy')) {
+        setErrorMessage("Camera is currently in use by another app or tab. Please close other camera apps and retry, or use 'SCAN FROM PHOTO'.");
       } else {
-        setErrorMessage(err.message || "Failed to access camera. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
+        setErrorMessage(errMsg || "Failed to access camera. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
       }
     } finally {
       setIsStartingCamera(false);
     }
+  };
+
+  const switchCamera = async () => {
+    if (availableCameras.length <= 1 || isStartingCamera) return;
+    const nextIdx = (cameraIndex + 1) % availableCameras.length;
+    setCameraIndex(nextIdx);
+    await startCamera(availableCameras[nextIdx].id);
   };
 
   const stopCamera = async () => {
@@ -455,20 +516,35 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
                     {/* Camera Toggle Button */}
                     <button
                       type="button"
-                      onClick={isCameraActive ? stopCamera : startCamera}
+                      onClick={isCameraActive ? stopCamera : () => startCamera()}
                       disabled={isStartingCamera}
                       className={`p-3.5 border text-xs font-hud font-bold tracking-wider flex flex-col items-center justify-center gap-2 transition-all ${isCameraActive ? 'bg-stark-crimson/20 border-stark-crimson text-stark-crimson shadow-glow-crimson' : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'} disabled:opacity-50`}
                       style={{clipPath: "polygon(5% 0, 100% 0, 100% 100%, 0 100%)"}}
                     >
                       <Camera size={22} className={isStartingCamera ? 'animate-pulse text-arc-cyan' : ''} />
-                      <span>{isCameraActive ? 'STOP CAMERA' : (isStartingCamera ? 'REQUESTING PERMISSION...' : 'OPEN CAMERA')}</span>
+                      <span>{isCameraActive ? 'STOP CAMERA' : (isStartingCamera ? 'OPENING CAMERA...' : 'OPEN CAMERA')}</span>
                       <span className="text-[9px] font-mono opacity-60">{isCameraActive ? 'Tap to close camera' : 'Prompt & scan live QR'}</span>
                     </button>
                   </div>
 
                   {/* Camera Scanner Viewport (Always in DOM so Html5Qrcode never throws element-not-found) */}
                   <div className={`relative mt-2 ${isCameraActive ? 'block' : 'hidden'}`}>
+                    {/* Multi-camera Flip Button */}
+                    {availableCameras.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={switchCamera}
+                        disabled={isStartingCamera}
+                        className="absolute top-2.5 right-2.5 z-20 px-2.5 py-1.5 bg-stark-bg/85 border border-arc-cyan/70 text-arc-cyan text-[10px] font-hud tracking-wider flex items-center gap-1.5 backdrop-blur hover:bg-arc-cyan hover:text-stark-bg transition-all shadow-glow-cyan disabled:opacity-50"
+                        title="Switch Camera (Front/Rear)"
+                      >
+                        <RefreshCw size={11} className={isStartingCamera ? 'animate-spin' : ''} />
+                        <span>FLIP CAM ({cameraIndex + 1}/{availableCameras.length})</span>
+                      </button>
+                    )}
+
                     <div id="camera-reader" className="w-full bg-black border-2 border-arc-cyan overflow-hidden relative min-h-[260px] shadow-glow-cyan" />
+                    
                     {/* Cyber HUD Overlay */}
                     <div className="absolute inset-0 pointer-events-none">
                       <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-arc-cyan"></div>
@@ -476,6 +552,9 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
                       <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-arc-cyan"></div>
                       <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-arc-cyan"></div>
                       <div className="absolute top-1/2 left-0 w-full h-[1px] bg-arc-cyan/50 shadow-glow-cyan animate-[scan_2s_ease-in-out_infinite]"></div>
+                      <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 bg-black/80 border border-arc-cyan/50 text-[9px] font-mono text-arc-cyan tracking-wider shadow-glow-cyan">
+                        [ AIM CAMERA AT VEIL QR CODE ]
+                      </div>
                     </div>
                   </div>
 

@@ -113,8 +113,19 @@ async function runTests() {
   if (parsed3.text !== 'Quantum Transmission 3') throw new Error('Decryption mismatch on Message 3');
   console.log('[3] Follow-up Message (Alice -> Bob): ✅ PASS');
 
+  // Test 4: Header AAD Tamper Rejection Test (MitM Attack Simulation)
+  let tamperCaught = false;
+  try {
+    const tamperedHeader = { ...envRecv3.rh, n: envRecv3.rh.n + 99 };
+    await bobRatchet.decryptMessage(tamperedHeader, envRecv3.iv, envRecv3.ct);
+  } catch (e) {
+    tamperCaught = true;
+  }
+  if (!tamperCaught) throw new Error("CRITICAL: Tampered header was NOT rejected by AES-GCM AAD!");
+  console.log('[4] Header AAD Tamper Rejection (MitM Deflection): ✅ PASS');
+
   console.log('\n═══════════════════════════════════════════════════');
-  console.log(' ✅ ALL 3 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
+  console.log(' ✅ ALL 4 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
   console.log('═══════════════════════════════════════════════════\n');
 }
 

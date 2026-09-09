@@ -23,12 +23,24 @@ import { randomUUID } from 'crypto';
 
 let firebaseEnabled = false;
 try {
-  const serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
-  initializeApp({
-    credential: cert(serviceAccount)
-  });
-  firebaseEnabled = true;
-  console.log("Firebase Admin initialized for Zero-Knowledge Push");
+  let serviceAccount = null;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    } catch {
+      if (existsSync(process.env.FIREBASE_SERVICE_ACCOUNT)) {
+        serviceAccount = JSON.parse(readFileSync(process.env.FIREBASE_SERVICE_ACCOUNT, 'utf8'));
+      }
+    }
+  } else if (existsSync('./serviceAccountKey.json')) {
+    serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
+  }
+
+  if (serviceAccount) {
+    initializeApp({ credential: cert(serviceAccount) });
+    firebaseEnabled = true;
+    console.log("Firebase Admin initialized for Zero-Knowledge Push");
+  }
 } catch(e) {
   console.warn("Firebase Admin failed to init, skipping push capabilities. Error:", e.message);
 }
@@ -72,9 +84,17 @@ if (STATIC_DIR) {
 
 // HTTP Server for Attachments, Health & Web Frontend
 const server = http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin && validateOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);

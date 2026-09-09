@@ -1,6 +1,16 @@
 // In-memory rate limiting using Token Bucket algorithm
 const rateLimits = new Map();
 
+// Periodic GC to prevent unbounded memory growth from IP tracking
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimits.entries()) {
+    if (now - bucket.lastRefill > 300000) { // 5 minutes inactive
+      rateLimits.delete(key);
+    }
+  }
+}, 60000);
+
 function getBucket(ip, type) {
   const key = `${ip}:${type}`;
   let bucket = rateLimits.get(key);
@@ -43,6 +53,22 @@ export function checkMessageRateLimit(ip) {
 }
 
 export function validateOrigin(origin) {
-  // Allow all origins over tunnel & native capacitor
-  return true;
+  // Non-browser clients, native apps, or direct connections omit the Origin header
+  if (!origin) return true;
+
+  try {
+    const url = new URL(origin);
+    const host = url.hostname.toLowerCase();
+    
+    // Allow local development and mobile Capacitor environments
+    if (host === 'localhost' || host === '127.0.0.1' || host === '10.0.2.2') return true;
+    if (url.protocol === 'capacitor:' || origin.startsWith('capacitor://')) return true;
+    
+    // Allow verified production deployment domains and cloudflare tunnels
+    if (host.endsWith('.onrender.com') || host.endsWith('.trycloudflare.com')) return true;
+  } catch {
+    return false;
+  }
+
+  return false;
 }

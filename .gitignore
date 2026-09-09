@@ -20,4 +20,7 @@ server/server_signing_key.json
 *.db-journal
 *.exe
 server/attachments/
-
+cloudflared.exe
+.env
+.env.*
+*.enc

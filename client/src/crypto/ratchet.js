@@ -20,6 +20,10 @@ function kdf_rk(rk, dh_out) {
   return { next_rk, next_ck };
 }
 
+export function computeHeaderAAD(header) {
+  return utf8ToBytes(JSON.stringify({ dh: header.dh, n: header.n, pn: header.pn }));
+}
+
 export class DoubleRatchet {
   constructor(rootKey, isInitiator, theirInitialPub = null, myInitialPriv = null) {
     this.rootKey = new Uint8Array(rootKey); // 32 bytes
@@ -132,19 +136,21 @@ export class DoubleRatchet {
     padded.set(rawPlaintext, 0);
     padded[rawPlaintext.length] = 0;
 
-    // We can also authenticate the header by using AAD, but for simplicity of Double Ratchet, 
-    // GCM handles ciphertext integrity. We should bind the AAD.
-    const headerStr = JSON.stringify({ dh: bytesToBase64(this.DHs.pub), n: this.Ns, pn: this.PN });
-    const aad = utf8ToBytes(headerStr);
+    const header = {
+      dh: bytesToBase64(this.DHs.pub),
+      n: this.Ns,
+      pn: this.PN
+    };
+    const aad = computeHeaderAAD(header);
 
-    const ciphertextBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, padded);
+    const ciphertextBuf = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: aad },
+      key,
+      padded
+    );
     
     const out = {
-      header: {
-        dh: bytesToBase64(this.DHs.pub),
-        n: this.Ns,
-        pn: this.PN
-      },
+      header,
       iv: bytesToBase64(iv),
       ct: bytesToBase64(new Uint8Array(ciphertextBuf))
     };
@@ -161,8 +167,9 @@ export class DoubleRatchet {
       delete this.MKSKIPPED[dhKey][header.n];
       
       const key = await crypto.subtle.importKey("raw", mk, { name: "AES-GCM" }, false, ["decrypt"]);
+      const aad = computeHeaderAAD(header);
       const plaintextBuf = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: base64ToBytes(ivB64) },
+        { name: "AES-GCM", iv: base64ToBytes(ivB64), additionalData: aad },
         key,
         base64ToBytes(ctB64)
       );
@@ -214,10 +221,11 @@ export class DoubleRatchet {
     this.Nr++;
 
     const key = await crypto.subtle.importKey("raw", mk, { name: "AES-GCM" }, false, ["decrypt"]);
+    const aad = computeHeaderAAD(header);
     let plaintextBuf;
     try {
       plaintextBuf = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: base64ToBytes(ivB64) },
+        { name: "AES-GCM", iv: base64ToBytes(ivB64), additionalData: aad },
         key,
         base64ToBytes(ctB64)
       );

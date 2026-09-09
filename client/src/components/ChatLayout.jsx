@@ -187,6 +187,37 @@ export default function ChatLayout({ keys, myId }) {
   const pingIntervalRef = useRef(null);
   const pingTimeoutRef = useRef(null);
 
+  // Per-Peer Concurrency Lock to eliminate Double Ratchet race conditions
+  const peerLocks = useRef(new Map());
+  const withPeerLock = (peerId, fn) => {
+    if (!peerId) return fn();
+    const currentLock = peerLocks.current.get(peerId) || Promise.resolve();
+    const nextLock = currentLock.then(() => fn()).catch((err) => {
+      console.error(`[VEIL] Mutex error for peer ${peerId}:`, err);
+      throw err;
+    });
+    peerLocks.current.set(peerId, nextLock.catch(() => {}));
+    return nextLock;
+  };
+
+  // RAM Media Cleanup to prevent memory bloat
+  const cleanupDecryptedMedia = () => {
+    setDecryptedMedia(prev => {
+      Object.values(prev).forEach(item => {
+        if (item?.objectUrl) {
+          revokeAttachmentUrl(item.objectUrl);
+        }
+      });
+      return {};
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      cleanupDecryptedMedia();
+    };
+  }, []);
+
   useEffect(() => {
     loadContacts();
     loadGroups();
@@ -239,6 +270,7 @@ export default function ChatLayout({ keys, myId }) {
 
   useEffect(() => {
     activeContactRef.current = activeContact;
+    cleanupDecryptedMedia();
     if (activeContact) {
       activeGroupRef.current = null;
       setActiveGroup(null);
@@ -248,6 +280,7 @@ export default function ChatLayout({ keys, myId }) {
 
   useEffect(() => {
     activeGroupRef.current = activeGroup;
+    cleanupDecryptedMedia();
     if (activeGroup) {
       activeContactRef.current = null;
       setActiveContact(null);
@@ -345,128 +378,130 @@ export default function ChatLayout({ keys, myId }) {
     }
   };
 
-  const encryptAndSendToPeer = async (targetContact, payloadData, ttl = 0) => {
-    const peerId = targetContact.id;
-    let ratchet = sessionKeys.current[peerId];
-    let ekpub = undefined, kemct = undefined, opkId = undefined;
+  const encryptAndSendToPeer = (targetContact, payloadData, ttl = 0) => {
+    return withPeerLock(targetContact.id, async () => {
+      const peerId = targetContact.id;
+      let ratchet = sessionKeys.current[peerId];
+      let ekpub = undefined, kemct = undefined, opkId = undefined;
 
-    if (!ratchet) {
-      const bundle = await new Promise((resolve) => {
-        if (pendingBundleRequests.current[peerId]) {
-          const existing = pendingBundleRequests.current[peerId];
-          pendingBundleRequests.current[peerId] = (b) => {
-            existing(b);
-            resolve(b);
-          };
-        } else {
-          pendingBundleRequests.current[peerId] = resolve;
-          if (ws.current?.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: peerId }));
-          } else {
-            resolve(null);
-          }
-        }
-        setTimeout(() => {
+      if (!ratchet) {
+        const bundle = await new Promise((resolve) => {
           if (pendingBundleRequests.current[peerId]) {
-            delete pendingBundleRequests.current[peerId];
-            resolve(null);
+            const existing = pendingBundleRequests.current[peerId];
+            pendingBundleRequests.current[peerId] = (b) => {
+              existing(b);
+              resolve(b);
+            };
+          } else {
+            pendingBundleRequests.current[peerId] = resolve;
+            if (ws.current?.readyState === WebSocket.OPEN) {
+              ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: peerId }));
+            } else {
+              resolve(null);
+            }
           }
-        }, 5000);
-      });
+          setTimeout(() => {
+            if (pendingBundleRequests.current[peerId]) {
+              delete pendingBundleRequests.current[peerId];
+              resolve(null);
+            }
+          }, 5000);
+        });
 
-      if (!bundle) throw new Error(`Could not fetch prekeys for peer ${peerId.slice(0, 8)}`);
+        if (!bundle) throw new Error(`Could not fetch prekeys for peer ${peerId.slice(0, 8)}`);
 
-      if (!sessionKeys.current[peerId]) {
-        const idPub = targetContact.ed25519Pub || bundle.identity?.identityEd25519Pub;
-        if (idPub) {
-          try {
-            verifyPreKeyBundle(bundle, idPub);
-          } catch (verr) {
-            console.warn("[VEIL] PreKey bundle signature check:", verr.message);
+        if (!sessionKeys.current[peerId]) {
+          const idPub = targetContact.ed25519Pub || bundle.identity?.identityEd25519Pub;
+          if (idPub) {
+            try {
+              verifyPreKeyBundle(bundle, idPub);
+            } catch (verr) {
+              console.warn("[VEIL] PreKey bundle signature check:", verr.message);
+            }
           }
+          const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, peerId);
+          const theirPub = base64ToBytes(bundle.signedPreKey.pub);
+          ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
+          ratchet.ekpub = sess.ephemeralX25519PubB64;
+          ratchet.kemct = sess.kemCiphertextB64;
+          ratchet.opkId = sess.opkId;
+          sessionKeys.current[peerId] = ratchet;
+        } else {
+          ratchet = sessionKeys.current[peerId];
         }
-        const sess = computeInitiatorSession(bundle, keys.x25519.secretKeyB64, myId, peerId);
-        const theirPub = base64ToBytes(bundle.signedPreKey.pub);
-        ratchet = new DoubleRatchet(sess.sessionKey, true, theirPub);
-        ratchet.ekpub = sess.ephemeralX25519PubB64;
-        ratchet.kemct = sess.kemCiphertextB64;
-        ratchet.opkId = sess.opkId;
-        sessionKeys.current[peerId] = ratchet;
-      } else {
-        ratchet = sessionKeys.current[peerId];
       }
-    }
 
-    if (ratchet.ekpub && ratchet.kemct) {
-      ekpub = ratchet.ekpub;
-      kemct = ratchet.kemct;
-      opkId = ratchet.opkId;
-      delete ratchet.ekpub;
-      delete ratchet.kemct;
-      delete ratchet.opkId;
-    }
+      if (ratchet.ekpub && ratchet.kemct) {
+        ekpub = ratchet.ekpub;
+        kemct = ratchet.kemct;
+        opkId = ratchet.opkId;
+        delete ratchet.ekpub;
+        delete ratchet.kemct;
+        delete ratchet.opkId;
+      }
 
-    const seq = Date.now() + Math.floor(Math.random() * 1000);
-    const ts = Date.now();
+      const seq = Date.now() + Math.floor(Math.random() * 1000);
+      const ts = Date.now();
 
-    const innerPayloadStr = typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData);
-    const { header, iv, ct } = await ratchet.encryptMessage(innerPayloadStr);
+      const innerPayloadStr = typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData);
+      const { header, iv, ct } = await ratchet.encryptMessage(innerPayloadStr);
 
-    const { saveRatchetState } = await import('../crypto/keyStorage.js');
-    await saveRatchetState(peerId, ratchet.serialize());
+      const { saveRatchetState } = await import('../crypto/keyStorage.js');
+      await saveRatchetState(peerId, ratchet.serialize());
 
-    const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+      const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
 
-    const envelope = {
-      v: 1,
-      type: 'msg',
-      from: myId,
-      to: peerId,
-      seq,
-      ts,
-      iv,
-      ct,
-      rh: header,
-      ttl: ttl || 0,
-      senderX25519Pub: keys.x25519.publicKeyB64,
-      senderEd25519Pub: keys.ed25519.publicKeyB64,
-      senderName: myDisplayName
-    };
-
-    if (ekpub && kemct) {
-      envelope.ekpub = ekpub;
-      envelope.kemct = kemct;
-      if (opkId) envelope.opkId = opkId;
-    }
-
-    let finalPayload = envelope;
-    if (targetContact.deliveryToken && mySenderCertRef.current) {
-      const { sealMessage } = await import('../crypto/sealedSender.js');
-      delete envelope.from;
-      const sealedEnvelope = await sealMessage(
-        targetContact.x25519Pub,
-        mySenderCertRef.current,
-        JSON.stringify(envelope)
-      );
-      finalPayload = {
-        type: 'sealed_msg',
+      const envelope = {
+        v: 1,
+        type: 'msg',
+        from: myId,
         to: peerId,
-        ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
-        envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
-        mac: sealedEnvelope.mac,
-        iv: sealedEnvelope.iv,
-        deliveryToken: targetContact.deliveryToken
+        seq,
+        ts,
+        iv,
+        ct,
+        rh: header,
+        ttl: ttl || 0,
+        senderX25519Pub: keys.x25519.publicKeyB64,
+        senderEd25519Pub: keys.ed25519.publicKeyB64,
+        senderName: myDisplayName
       };
-    }
 
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify(finalPayload));
-    } else {
-      const { saveToOutbox } = await import('../storage/db.js');
-      await saveToOutbox(finalPayload);
-    }
+      if (ekpub && kemct) {
+        envelope.ekpub = ekpub;
+        envelope.kemct = kemct;
+        if (opkId) envelope.opkId = opkId;
+      }
 
-    return { seq, ts };
+      let finalPayload = envelope;
+      if (targetContact.deliveryToken && mySenderCertRef.current) {
+        const { sealMessage } = await import('../crypto/sealedSender.js');
+        delete envelope.from;
+        const sealedEnvelope = await sealMessage(
+          targetContact.x25519Pub,
+          mySenderCertRef.current,
+          JSON.stringify(envelope)
+        );
+        finalPayload = {
+          type: 'sealed_msg',
+          to: peerId,
+          ephemeralPublicKey: sealedEnvelope.ephemeralPublicKey,
+          envelopeCiphertext: sealedEnvelope.envelopeCiphertext,
+          mac: sealedEnvelope.mac,
+          iv: sealedEnvelope.iv,
+          deliveryToken: targetContact.deliveryToken
+        };
+      }
+
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify(finalPayload));
+      } else {
+        const { saveToOutbox } = await import('../storage/db.js');
+        await saveToOutbox(finalPayload);
+      }
+
+      return { seq, ts };
+    });
   };
 
   const handleCreateGroup = async (groupName, selectedMembers) => {
@@ -679,7 +714,7 @@ export default function ChatLayout({ keys, myId }) {
     if (!file) return;
 
     if (file.size > 15 * 1024 * 1024) {
-      alert(`File size ${(file.size / (1024 * 1024)).toFixed(1)}MB exceeds maximum 15MB limit.`);
+      showToast(`Attachment exceeds 15MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB)`);
       e.target.value = '';
       return;
     }
@@ -927,107 +962,87 @@ export default function ChatLayout({ keys, myId }) {
         msgData = JSON.parse(unsealed.payload);
       }
 
-      const contact = contactsRef.current.find(c => c.id === senderId);
+      await withPeerLock(senderId, async () => {
+        const contact = contactsRef.current.find(c => c.id === senderId);
 
-      let ratchet = sessionKeys.current[senderId];
-      if (msgData.ekpub && msgData.kemct) {
-        // Handshake packet from sender - always compute fresh receiver session
-        const localPreKeys = await getLocalPreKeys();
-        if (!localPreKeys) throw new Error("No local prekeys found");
-        
-        let opkPrivB64 = null;
-        if (msgData.opkId) {
-          const opkIndex = localPreKeys.oneTimePreKeys.findIndex(k => k.id === msgData.opkId);
-          if (opkIndex !== -1) {
-            opkPrivB64 = localPreKeys.oneTimePreKeys[opkIndex].priv;
-            localPreKeys.oneTimePreKeys.splice(opkIndex, 1);
-            saveLocalPreKeys(localPreKeys).catch(() => {});
-          }
-        }
-
-        let senderX25519Pub = contact?.x25519Pub || msgData.senderX25519Pub;
-        if (!senderX25519Pub) {
-          // Fetch prekeys from server as fallback
-          const bundle = await new Promise(resolve => {
-            pendingBundleRequests.current[senderId] = resolve;
-            if (ws.current?.readyState === WebSocket.OPEN) {
-              ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: senderId }));
-            } else {
-              resolve(null);
+        let ratchet = sessionKeys.current[senderId];
+        if (msgData.ekpub && msgData.kemct) {
+          // Handshake packet from sender - always compute fresh receiver session
+          const localPreKeys = await getLocalPreKeys();
+          if (!localPreKeys) throw new Error("No local prekeys found");
+          
+          let opkPrivB64 = null;
+          if (msgData.opkId) {
+            const opkIndex = localPreKeys.oneTimePreKeys.findIndex(k => k.id === msgData.opkId);
+            if (opkIndex !== -1) {
+              opkPrivB64 = localPreKeys.oneTimePreKeys[opkIndex].priv;
+              localPreKeys.oneTimePreKeys.splice(opkIndex, 1);
+              saveLocalPreKeys(localPreKeys).catch(() => {});
             }
-            setTimeout(() => {
-              if (pendingBundleRequests.current[senderId]) {
-                delete pendingBundleRequests.current[senderId];
+          }
+
+          let senderX25519Pub = contact?.x25519Pub || msgData.senderX25519Pub;
+          if (!senderX25519Pub) {
+            // Fetch prekeys from server as fallback
+            const bundle = await new Promise(resolve => {
+              pendingBundleRequests.current[senderId] = resolve;
+              if (ws.current?.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'get_prekeys', targetCipherId: senderId }));
+              } else {
                 resolve(null);
               }
-            }, 4000);
-          });
-          if (bundle?.identity?.identityX25519Pub) {
-            senderX25519Pub = bundle.identity.identityX25519Pub;
-          }
-        }
-
-        if (!senderX25519Pub) throw new Error("Missing sender public key for session handshake");
-
-        const sess = computeReceiverSession(
-          msgData.ekpub, msgData.kemct, senderX25519Pub, msgData.opkId,
-          keys.x25519.secretKeyB64,
-          localPreKeys.signedPreKey,
-          localPreKeys.signedPqPreKey,
-          opkPrivB64,
-          senderId, myId
-        );
-        const mySpkPriv = base64ToBytes(localPreKeys.signedPreKey);
-        const senderEkPub = base64ToBytes(msgData.ekpub);
-        ratchet = new DoubleRatchet(sess.sessionKey, false, senderEkPub, mySpkPriv);
-        sessionKeys.current[senderId] = ratchet;
-      }
-      
-      if (!ratchet) throw new Error("No session key");
-
-      const decrypted = await ratchet.decryptMessage(msgData.rh, msgData.iv, msgData.ct);
-      
-      const { saveRatchetState } = await import('../crypto/keyStorage.js');
-      await saveRatchetState(senderId, ratchet.serialize());
-
-      let text = decrypted;
-      let contactToken = null;
-      let attachment = null;
-      let replyTo = null;
-      let isGroupMsg = false;
-      let groupPayload = null;
-
-      try {
-        const payload = JSON.parse(decrypted);
-
-        if (payload.action === 'reaction') {
-          const { targetSeq, emoji, groupId } = payload;
-          const targetChatId = groupId || senderId;
-          if (targetSeq && emoji) {
-            const applyReaction = (curMsgs) => curMsgs.map(m => {
-              if (m.seq === targetSeq) {
-                const curReactions = { ...(m.reactions || {}) };
-                const curUsers = curReactions[emoji] || [];
-                if (curUsers.includes(senderId)) {
-                  curReactions[emoji] = curUsers.filter(id => id !== senderId);
-                  if (curReactions[emoji].length === 0) delete curReactions[emoji];
-                } else {
-                  curReactions[emoji] = [...curUsers, senderId];
+              setTimeout(() => {
+                if (pendingBundleRequests.current[senderId]) {
+                  delete pendingBundleRequests.current[senderId];
+                  resolve(null);
                 }
-                updateMessageReactions(targetChatId, targetSeq, curReactions).catch(console.error);
-                return { ...m, reactions: curReactions };
-              }
-              return m;
+              }, 4000);
             });
+            if (bundle?.identity?.identityX25519Pub) {
+              senderX25519Pub = bundle.identity.identityX25519Pub;
+            }
+          }
 
-            setMessages(prev => applyReaction(prev));
+          if (!senderX25519Pub) throw new Error("Missing sender public key for session handshake");
 
-            const isCurrentChat = (groupId && activeGroupRef.current?.id === groupId) || (!groupId && activeContactRef.current?.id === senderId);
-            if (!isCurrentChat) {
-              getMessages(targetChatId).then(allMsgs => {
-                const target = allMsgs.find(m => m.seq === targetSeq);
-                if (target) {
-                  const curReactions = { ...(target.reactions || {}) };
+          const sess = computeReceiverSession(
+            msgData.ekpub, msgData.kemct, senderX25519Pub, msgData.opkId,
+            keys.x25519.secretKeyB64,
+            localPreKeys.signedPreKey,
+            localPreKeys.signedPqPreKey,
+            opkPrivB64,
+            senderId, myId
+          );
+          const mySpkPriv = base64ToBytes(localPreKeys.signedPreKey);
+          const senderEkPub = base64ToBytes(msgData.ekpub);
+          ratchet = new DoubleRatchet(sess.sessionKey, false, senderEkPub, mySpkPriv);
+          sessionKeys.current[senderId] = ratchet;
+        }
+        
+        if (!ratchet) throw new Error("No session key");
+
+        const decrypted = await ratchet.decryptMessage(msgData.rh, msgData.iv, msgData.ct);
+        
+        const { saveRatchetState } = await import('../crypto/keyStorage.js');
+        await saveRatchetState(senderId, ratchet.serialize());
+
+        let text = decrypted;
+        let contactToken = null;
+        let attachment = null;
+        let replyTo = null;
+        let isGroupMsg = false;
+        let groupPayload = null;
+
+        try {
+          const payload = JSON.parse(decrypted);
+
+          if (payload.action === 'reaction') {
+            const { targetSeq, emoji, groupId } = payload;
+            const targetChatId = groupId || senderId;
+            if (targetSeq && emoji) {
+              const applyReaction = (curMsgs) => curMsgs.map(m => {
+                if (m.seq === targetSeq) {
+                  const curReactions = { ...(m.reactions || {}) };
                   const curUsers = curReactions[emoji] || [];
                   if (curUsers.includes(senderId)) {
                     curReactions[emoji] = curUsers.filter(id => id !== senderId);
@@ -1036,162 +1051,179 @@ export default function ChatLayout({ keys, myId }) {
                     curReactions[emoji] = [...curUsers, senderId];
                   }
                   updateMessageReactions(targetChatId, targetSeq, curReactions).catch(console.error);
+                  return { ...m, reactions: curReactions };
                 }
+                return m;
               });
-            }
-          }
-          return;
-        }
 
-        if (payload.type === 'group_event') {
+              setMessages(prev => applyReaction(prev));
+
+              const isCurrentChat = (groupId && activeGroupRef.current?.id === groupId) || (!groupId && activeContactRef.current?.id === senderId);
+              if (!isCurrentChat) {
+                getMessages(targetChatId).then(allMsgs => {
+                  const target = allMsgs.find(m => m.seq === targetSeq);
+                  if (target) {
+                    const curReactions = { ...(target.reactions || {}) };
+                    const curUsers = curReactions[emoji] || [];
+                    if (curUsers.includes(senderId)) {
+                      curReactions[emoji] = curUsers.filter(id => id !== senderId);
+                      if (curReactions[emoji].length === 0) delete curReactions[emoji];
+                    } else {
+                      curReactions[emoji] = [...curUsers, senderId];
+                    }
+                    updateMessageReactions(targetChatId, targetSeq, curReactions).catch(console.error);
+                  }
+                });
+              }
+            }
+            return;
+          }
+
+          if (payload.type === 'group_event') {
+            if (payload.groupId) {
+              let g = await getGroup(payload.groupId);
+              const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+              if (!g) {
+                g = {
+                  id: payload.groupId,
+                  name: payload.groupName || 'Encrypted Group',
+                  createdBy: payload.senderId || senderId,
+                  createdAt: Date.now(),
+                  members: payload.members || [
+                    { id: myId, name: myDisplayName, role: 'member' },
+                    { id: senderId, name: payload.senderName || `Agent-${senderId.slice(0, 4)}`, role: 'member' }
+                  ]
+                };
+              } else if (payload.members) {
+                const existingIds = new Set(g.members.map(m => m.id));
+                const merged = [...g.members];
+                payload.members.forEach(m => {
+                  if (!existingIds.has(m.id)) merged.push(m);
+                });
+                g.members = merged;
+              }
+              await saveGroup(g);
+              const allG = await getGroups();
+              groupsRef.current = allG;
+              setGroups(allG);
+              if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
+              showToast(`Group: ${payload.text || payload.groupName}`);
+            }
+            return;
+          }
+
           if (payload.groupId) {
-            let g = await getGroup(payload.groupId);
-            const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
-            if (!g) {
-              g = {
-                id: payload.groupId,
-                name: payload.groupName || 'Encrypted Group',
-                createdBy: payload.senderId || senderId,
-                createdAt: Date.now(),
-                members: payload.members || [
-                  { id: myId, name: myDisplayName, role: 'member' },
-                  { id: senderId, name: payload.senderName || `Agent-${senderId.slice(0, 4)}`, role: 'member' }
-                ]
-              };
-            } else if (payload.members) {
-              const existingIds = new Set(g.members.map(m => m.id));
-              const merged = [...g.members];
-              payload.members.forEach(m => {
-                if (!existingIds.has(m.id)) merged.push(m);
-              });
-              g.members = merged;
-            }
+            isGroupMsg = true;
+            groupPayload = payload;
+          }
+
+          if (payload.text !== undefined) text = payload.text;
+          if (payload.attachment) {
+            attachment = payload.attachment;
+            loadAttachment(payload.attachment);
+          }
+          if (payload.deliveryToken) contactToken = payload.deliveryToken;
+          if (payload.replyTo) replyTo = payload.replyTo;
+        } catch (e) {
+          // legacy plaintext
+        }
+
+        if (isGroupMsg && groupPayload) {
+          const gId = groupPayload.groupId;
+          let g = await getGroup(gId);
+          const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+          const senderDisplayName = groupPayload.senderName || msgData.senderName || (contact ? contact.name : `Agent-${senderId.slice(0, 4)}`);
+
+          if (!g) {
+            g = {
+              id: gId,
+              name: groupPayload.groupName || 'Encrypted Group',
+              createdBy: groupPayload.senderId || senderId,
+              createdAt: Date.now(),
+              members: [
+                { id: myId, name: myDisplayName, role: 'member' },
+                { id: senderId, name: senderDisplayName, role: 'member' }
+              ]
+            };
             await saveGroup(g);
             const allG = await getGroups();
             groupsRef.current = allG;
             setGroups(allG);
-            if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
-            showToast(`Group: ${payload.text || payload.groupName}`);
+          } else {
+            const hasMember = g.members.some(m => m.id === senderId);
+            if (!hasMember) {
+              g.members.push({ id: senderId, name: senderDisplayName, role: 'member' });
+              await saveGroup(g);
+              const allG = await getGroups();
+              groupsRef.current = allG;
+              setGroups(allG);
+              if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
+            }
+          }
+
+          const groupMsgObj = {
+            contactId: gId,
+            groupId: gId,
+            fromMe: false,
+            senderId,
+            senderName: senderDisplayName,
+            senderX25519Pub: groupPayload.senderX25519Pub || (contact ? contact.x25519Pub : null),
+            senderEd25519Pub: groupPayload.senderEd25519Pub || (contact ? contact.ed25519Pub : null),
+            text,
+            attachment,
+            replyTo: replyTo || undefined,
+            reactions: {},
+            ts: msgData.ts,
+            seq: msgData.seq,
+            ttl: msgData.ttl || 0
+          };
+          await saveMessage(groupMsgObj);
+
+          if (activeGroupRef.current && activeGroupRef.current.id === gId) {
+            setMessages(prev => [...prev, groupMsgObj]);
+            setTypingUsers(prev => ({ ...prev, [senderId]: false }));
+          } else {
+            showToast(`New message in ${g.name}: ${senderDisplayName}`);
           }
           return;
         }
 
-        if (payload.groupId) {
-          isGroupMsg = true;
-          groupPayload = payload;
-        }
-
-        if (payload.text !== undefined) text = payload.text;
-        if (payload.attachment) {
-          attachment = payload.attachment;
-          loadAttachment(payload.attachment);
-        }
-        if (payload.deliveryToken) contactToken = payload.deliveryToken;
-        if (payload.replyTo) replyTo = payload.replyTo;
-      } catch (e) {
-        // legacy plaintext
-      }
-
-      if (isGroupMsg && groupPayload) {
-        const gId = groupPayload.groupId;
-        let g = await getGroup(gId);
-        const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
-        const senderDisplayName = groupPayload.senderName || msgData.senderName || (contact ? contact.name : `Agent-${senderId.slice(0, 4)}`);
-
-        if (!g) {
-          g = {
-            id: gId,
-            name: groupPayload.groupName || 'Encrypted Group',
-            createdBy: groupPayload.senderId || senderId,
-            createdAt: Date.now(),
-            members: [
-              { id: myId, name: myDisplayName, role: 'member' },
-              { id: senderId, name: senderDisplayName, role: 'member' }
-            ]
+        // Direct 1-on-1 Message Flow
+        if (!contact && senderId) {
+          const newContact = {
+            id: senderId,
+            name: msgData.senderName || `Agent-${senderId.slice(0, 4)}`,
+            deliveryToken: contactToken || undefined,
+            x25519Pub: msgData.senderX25519Pub,
+            ed25519Pub: msgData.senderEd25519Pub
           };
-          await saveGroup(g);
-          const allG = await getGroups();
-          groupsRef.current = allG;
-          setGroups(allG);
-        } else {
-          if (!g.members.some(m => m.id === senderId)) {
-            g.members.push({ id: senderId, name: senderDisplayName, role: 'member' });
-            await saveGroup(g);
-            const allG = await getGroups();
-            groupsRef.current = allG;
-            setGroups(allG);
-            if (activeGroupRef.current?.id === g.id) setActiveGroup(g);
-          }
+          await saveContact(newContact);
+          await loadContacts();
+        } else if (contact && contactToken && contact.deliveryToken !== contactToken) {
+          const updated = { ...contact, deliveryToken: contactToken };
+          await saveContact(updated);
+          const idx = contactsRef.current.findIndex(c => c.id === senderId);
+          if (idx !== -1) contactsRef.current[idx] = updated;
         }
-
+        
         const msgObj = {
-          contactId: gId,
-          groupId: gId,
+          contactId: senderId,
           fromMe: false,
-          senderId,
-          senderName: senderDisplayName,
-          senderX25519Pub: groupPayload.senderX25519Pub || msgData.senderX25519Pub,
-          senderEd25519Pub: groupPayload.senderEd25519Pub || msgData.senderEd25519Pub,
           text,
           attachment,
           replyTo: replyTo || undefined,
           reactions: {},
-          ts: msgData.ts || Date.now(),
-          seq: msgData.seq || Date.now(),
+          ts: msgData.ts,
+          seq: msgData.seq,
           ttl: msgData.ttl || 0
         };
-
         await saveMessage(msgObj);
-
-        if (activeGroupRef.current && activeGroupRef.current.id === gId) {
+        
+        if (activeContactRef.current && activeContactRef.current.id === senderId) {
           setMessages(prev => [...prev, msgObj]);
-        } else {
-          showToast(`New message in ${g.name}: ${senderDisplayName}`);
+          setTypingUsers(prev => ({ ...prev, [senderId]: false }));
         }
-        return;
-      }
-
-      // Direct 1-on-1 Message Flow
-      if (!contact) {
-        const senderDisplayName = msgData.senderName || `Agent-${senderId.slice(0, 4)}`;
-        const newContact = {
-          id: senderId,
-          name: senderDisplayName,
-          x25519Pub: msgData.senderX25519Pub || null,
-          ed25519Pub: msgData.senderEd25519Pub || null,
-          deliveryToken: contactToken || null,
-          verified: false,
-          addedAt: Date.now()
-        };
-        await saveContact(newContact);
-        const updatedContacts = await getContacts();
-        contactsRef.current = updatedContacts;
-        setContacts(updatedContacts);
-      } else if (contactToken && contact.deliveryToken !== contactToken) {
-        const updated = { ...contact, deliveryToken: contactToken };
-        await saveContact(updated);
-        setContacts(prev => prev.map(c => c.id === contact.id ? updated : c));
-        const idx = contactsRef.current.findIndex(c => c.id === contact.id);
-        if (idx !== -1) contactsRef.current[idx] = updated;
-      }
-      
-      const msgObj = {
-        contactId: senderId,
-        fromMe: false,
-        text,
-        attachment,
-        replyTo: replyTo || undefined,
-        reactions: {},
-        ts: msgData.ts,
-        seq: msgData.seq,
-        ttl: msgData.ttl || 0
-      };
-      await saveMessage(msgObj);
-      
-      if (activeContactRef.current && activeContactRef.current.id === senderId) {
-        setMessages(prev => [...prev, msgObj]);
-        setTypingUsers(prev => ({ ...prev, [senderId]: false }));
-      }
+      });
     } catch (e) {
       console.error("Message processing failed:", e);
       const errMsg = e.message || e.name || "Unknown WebCrypto Error";
@@ -1299,7 +1331,7 @@ export default function ChatLayout({ keys, myId }) {
 
       setReplyingTo(null);
     } catch (err) {
-      alert("Encryption or Socket Error: " + err.message);
+      showToast("Transmission failed: network or encryption session error");
       console.error(err);
     }
   };
@@ -1337,7 +1369,7 @@ export default function ChatLayout({ keys, myId }) {
         }
       } catch (err) {
         console.error("[VEIL] Attachment upload failed:", err);
-        alert("Attachment upload failed: " + err.message);
+        showToast("Attachment upload failed: network or relay error");
         setUploadingAttachment(false);
         return;
       }

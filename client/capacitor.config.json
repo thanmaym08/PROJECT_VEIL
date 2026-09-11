@@ -3,6 +3,7 @@
   "appName": "Veil",
   "webDir": "dist",
   "server": {
+    "hostname": "localhost",
     "androidScheme": "https",
     "cleartext": false
   }

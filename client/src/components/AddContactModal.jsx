@@ -78,41 +78,9 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
         throw new Error("Camera video capture is not supported in this browser. Please use 'SCAN FROM PHOTO' instead.");
       }
 
-      // 1. Query available cameras (this triggers the browser/OS camera permission prompt if not yet granted)
-      let cameras = availableCameras;
-      if (!cameras || cameras.length === 0) {
-        try {
-          cameras = await Html5Qrcode.getCameras();
-          if (cameras && cameras.length > 0) {
-            setAvailableCameras(cameras);
-          }
-        } catch (camErr) {
-          console.warn("getCameras error, falling back to default constraints:", camErr);
-        }
-      }
-
-      // 2. Select target camera: prefer back/rear camera on mobile devices
-      let cameraConfig;
-      if (specificCameraId) {
-        cameraConfig = specificCameraId;
-      } else if (cameras && cameras.length > 0) {
-        let chosenIdx = cameras.findIndex(c => {
-          const l = (c.label || '').toLowerCase();
-          return l.includes('back') || l.includes('rear') || l.includes('environment') || l.includes('facing back');
-        });
-        if (chosenIdx === -1) chosenIdx = 0;
-        setCameraIndex(chosenIdx);
-        cameraConfig = cameras[chosenIdx].id;
-      } else {
-        // Fallback to literal string facingMode constraint
-        cameraConfig = { facingMode: "environment" };
-      }
-
-      // 3. Make the reader viewport visible in DOM
+      // 1. Ensure reader viewport is visible in DOM
       setIsCameraActive(true);
-
-      // 4. Yield 150ms for DOM layout and hardware resource stabilization
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       const html5QrCode = new Html5Qrcode("camera-reader");
       html5QrCodeRef.current = html5QrCode;
@@ -121,7 +89,7 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
         fps: 15, 
         qrbox: (viewfinderWidth, viewfinderHeight) => {
           const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          const qrEdge = Math.max(180, Math.floor(minEdge * 0.75));
+          const qrEdge = Math.max(180, Math.floor(minEdge * 0.85));
           return { width: qrEdge, height: qrEdge };
         }
       };
@@ -131,36 +99,50 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
         stopCamera();
       };
 
-      try {
-        await html5QrCode.start(
-          cameraConfig,
-          qrConfig,
-          handleSuccess,
-          () => {} // Frame error ignore
-        );
-      } catch (firstErr) {
-        // If back camera failed (e.g. laptop or desktop webcam without environment facingMode), retry with user camera or cameras[0]
-        if (typeof cameraConfig === 'object' && cameraConfig.facingMode === 'environment') {
-          console.warn("Environment camera failed, retrying with user facingMode...", firstErr);
-          await html5QrCode.start(
-            { facingMode: "user" },
-            qrConfig,
-            handleSuccess,
-            () => {}
-          );
-        } else if (cameras && cameras.length > 0 && cameraConfig !== cameras[0].id) {
-          console.warn("Selected camera failed, retrying with default device...", firstErr);
-          setCameraIndex(0);
-          await html5QrCode.start(
-            cameras[0].id,
-            qrConfig,
-            handleSuccess,
-            () => {}
-          );
-        } else {
-          throw firstErr;
+      // 2. Direct single-shot camera start (avoids opening, stopping, and colliding hardware streams)
+      if (specificCameraId) {
+        await html5QrCode.start(specificCameraId, qrConfig, handleSuccess, () => {});
+      } else {
+        try {
+          // Prefer environment (rear) camera first
+          await html5QrCode.start({ facingMode: "environment" }, qrConfig, handleSuccess, () => {});
+        } catch (envErr) {
+          console.warn("Rear environment camera failed, falling back to user/webcam...", envErr);
+          try {
+            // Fallback to user (front/laptop) camera
+            await html5QrCode.start({ facingMode: "user" }, qrConfig, handleSuccess, () => {});
+          } catch (userErr) {
+            console.warn("User camera failed, checking enumerateDevices...", userErr);
+            if (navigator.mediaDevices?.enumerateDevices) {
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              const videoDevices = devices.filter(d => d.kind === 'videoinput');
+              if (videoDevices.length > 0) {
+                await html5QrCode.start(videoDevices[0].deviceId, qrConfig, handleSuccess, () => {});
+              } else {
+                throw userErr || envErr;
+              }
+            } else {
+              throw userErr || envErr;
+            }
+          }
         }
       }
+
+      // 3. Once stream is running stably, enumerate devices for the "FLIP CAM" button without interrupting the active stream
+      try {
+        if (navigator.mediaDevices?.enumerateDevices) {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices
+            .filter(d => d.kind === 'videoinput')
+            .map(d => ({ id: d.deviceId, label: d.label || `Camera ${d.deviceId.slice(0, 4)}` }));
+          if (videoDevices.length > 1) {
+            setAvailableCameras(videoDevices);
+          }
+        }
+      } catch (e) {
+        console.warn("Camera enumeration error:", e);
+      }
+
     } catch (err) {
       console.warn("Camera start failed:", err);
       setIsCameraActive(false);
@@ -169,7 +151,7 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
       const errName = err?.name || '';
 
       if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError' || errMsg.toLowerCase().includes('denied') || errMsg.toLowerCase().includes('permission')) {
-        setErrorMessage("Camera permission was denied. Please tap the lock icon 🔒 next to the website address to allow camera access, or use 'SCAN FROM PHOTO' below.");
+        setErrorMessage("Camera permission was denied. Please allow camera access in your browser settings (tap 🔒 in address bar) or Android Settings > Apps > Veil > Permissions, or use 'SCAN FROM PHOTO'.");
       } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError' || errMsg.toLowerCase().includes('not found') || errMsg.toLowerCase().includes('no camera')) {
         setErrorMessage("No physical camera detected on this device. Please use 'SCAN FROM PHOTO' to upload a QR screenshot.");
       } else if (errName === 'NotReadableError' || errName === 'TrackStartError' || errMsg.toLowerCase().includes('in use') || errMsg.toLowerCase().includes('busy')) {
@@ -384,7 +366,7 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
                 <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-arc-cyan"></div>
                 <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-arc-cyan"></div>
                 <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-arc-cyan"></div>
-                <QRCodeSVG id="my-telemetry-qr" value={myData} size={200} />
+                <QRCodeSVG id="my-telemetry-qr" value={myData} size={220} level="M" includeMargin={true} />
               </div>
 
               <div className="text-xs font-hud tracking-wider text-arc-cyan font-bold mb-1">

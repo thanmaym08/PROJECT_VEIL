@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, updateMessageFields, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup, getAllStarredMessages } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Zap, Radio } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Unlock, Zap, Radio, Phone, Video, Star, Pin, BarChart2, Camera, Edit3, Eye, EyeOff, Palette, Database, AtSign } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import CreateGroupModal from './CreateGroupModal';
@@ -10,6 +10,14 @@ import JoinGroupModal from './JoinGroupModal';
 import EmojiGifPicker from './EmojiGifPicker';
 import VoiceMemoPlayer from './VoiceMemoPlayer';
 import PanicModal from './PanicModal';
+import CallModal from './CallModal';
+import CameraSnapModal from './CameraSnapModal';
+import CreatePollModal from './CreatePollModal';
+import StarredMessagesModal from './StarredMessagesModal';
+import ForwardModal from './ForwardModal';
+import WallpaperModal, { WALLPAPERS } from './WallpaperModal';
+import BackupModal from './BackupModal';
+import CreateBroadcastModal from './CreateBroadcastModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes, bytesToBase64, utf8ToBytes } from '../crypto/utils';
@@ -135,8 +143,47 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
   const [sidebarFilter, setSidebarFilter] = useState('');
   const [showSearch, setShowSearch] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   const [showPanicModal, setShowPanicModal] = useState(false);
+
+  // WebRTC Call State
+  const [callState, setCallState] = useState(null);
+
+  // Feature Modals
+  const [showCameraSnap, setShowCameraSnap] = useState(false);
+  const [showCreatePoll, setShowCreatePoll] = useState(false);
+  const [showStarredMessages, setShowStarredMessages] = useState(false);
+  const [messageToForward, setMessageToForward] = useState(null);
+  const [showWallpaperModal, setShowWallpaperModal] = useState(false);
+  const [showBackupModal, setShowBackupModal] = useState(false);
+  const [showCreateBroadcast, setShowCreateBroadcast] = useState(false);
+  const [editingMessage, setEditingMessage] = useState(null);
+
+  // Chat Wallpaper
+  const [wallpaper, setWallpaper] = useState(() => localStorage.getItem('veil_wallpaper') || 'doodle');
+
+  // View Once Media
+  const [isViewOnceStaged, setIsViewOnceStaged] = useState(false);
+  const [ephemeralViewOnce, setEphemeralViewOnce] = useState(null);
+
+  // Chat Lock (Hidden Chats Folder)
+  const [isLockedChatsUnlocked, setIsLockedChatsUnlocked] = useState(false);
+  const [showLockedChatsAuth, setShowLockedChatsAuth] = useState(false);
+  const [lockedPassphraseInput, setLockedPassphraseInput] = useState('');
+  const [lockedSectionOpen, setLockedSectionOpen] = useState(false);
+
+  // Broadcast Lists
+  const [broadcastLists, setBroadcastLists] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('veil_broadcasts') || '[]');
+    } catch {
+      return [];
+    }
+  });
+  const [activeBroadcast, setActiveBroadcast] = useState(null);
+
+  // @Mentions Auto-complete
+  const [mentionSuggestions, setMentionSuggestions] = useState([]);
+  const [mentionFilter, setMentionFilter] = useState(null);
 
   // Audio / Voice Note recording state
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
@@ -1037,6 +1084,22 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
         }
       } else if (data.type === 'vanish_mode') {
         setVanishModes(prev => ({ ...prev, [data.from]: data.ttl }));
+      } else if (data.type === 'call_offer') {
+        const from = data.from;
+        const callerContact = contactsRef.current.find(c => c.id === from) || { id: from, name: `Agent-${from.slice(0, 4)}` };
+        setCallState({
+          mode: 'incoming',
+          callType: data.callType || 'audio',
+          peer: callerContact,
+          sdp: data.sdp
+        });
+      } else if (data.type === 'call_answer') {
+        setCallState(prev => prev ? { ...prev, mode: 'connected', sdp: data.sdp } : null);
+      } else if (data.type === 'call_ice_candidate') {
+        window.dispatchEvent(new CustomEvent('veil_ice_candidate', { detail: data }));
+      } else if (data.type === 'call_end' || data.type === 'call_reject') {
+        setCallState(null);
+        showToast(data.type === 'call_reject' ? (data.reason === 'offline' ? 'Peer is offline' : 'Call declined') : 'Call ended');
       } else if (data.type === 'prekeys_res') {
         const resolver = pendingBundleRequests.current[data.targetCipherId];
         if (resolver) {
@@ -1219,6 +1282,46 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
             return;
           }
 
+          if (payload.type === 'edit') {
+            const targetChatId = payload.groupId || senderId;
+            const targetSeq = payload.targetSeq;
+            const newText = payload.newText;
+            setMessages(prev => prev.map(m => m.seq === targetSeq ? { ...m, text: newText, edited: Date.now() } : m));
+            updateMessageFields(targetChatId, targetSeq, { text: newText, edited: Date.now() }).catch(console.error);
+            return;
+          }
+
+          if (payload.type === 'delete') {
+            const targetChatId = payload.groupId || senderId;
+            const targetSeq = payload.targetSeq;
+            setMessages(prev => prev.map(m => m.seq === targetSeq ? { ...m, text: '🚫 This message was deleted', deletedForEveryone: true } : m));
+            updateMessageFields(targetChatId, targetSeq, { text: '🚫 This message was deleted', deletedForEveryone: true }).catch(console.error);
+            return;
+          }
+
+          if (payload.type === 'poll_vote') {
+            const targetChatId = payload.groupId || senderId;
+            const { pollId, optionId, voterId } = payload;
+            setMessages(prev => prev.map(m => {
+              if (m.poll && m.poll.id === pollId) {
+                const updatedOptions = m.poll.options.map(opt => {
+                  let votes = opt.votes || [];
+                  if (opt.id === optionId) {
+                    votes = votes.includes(voterId) ? votes.filter(id => id !== voterId) : [...votes, voterId];
+                  } else if (!m.poll.multiple) {
+                    votes = votes.filter(id => id !== voterId);
+                  }
+                  return { ...opt, votes };
+                });
+                const updatedPoll = { ...m.poll, options: updatedOptions };
+                updateMessageFields(targetChatId, m.seq, { poll: updatedPoll }).catch(console.error);
+                return { ...m, poll: updatedPoll };
+              }
+              return m;
+            }));
+            return;
+          }
+
           if (payload.type === 'group_event') {
             if (payload.groupId) {
               let g = await getGroup(payload.groupId);
@@ -1312,6 +1415,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
             text,
             attachment,
             replyTo: replyTo || undefined,
+            poll: payload.poll || undefined,
+            viewOnce: (attachment?.viewOnce || payload.viewOnce) || undefined,
+            forwarded: payload.forwarded || undefined,
             reactions: {},
             ts: msgData.ts,
             seq: msgData.seq,
@@ -1352,6 +1458,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           text,
           attachment,
           replyTo: replyTo || undefined,
+          poll: payload.poll || undefined,
+          viewOnce: (attachment?.viewOnce || payload.viewOnce) || undefined,
+          forwarded: payload.forwarded || undefined,
           reactions: {},
           ts: msgData.ts,
           seq: msgData.seq,
@@ -1384,7 +1493,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
   };
 
   const sendEncryptedPayload = async (text, attachmentMetadata = null) => {
-    if (!activeContact && !activeGroup) return;
+    if (!activeContact && !activeGroup && !activeBroadcast) return;
 
     try {
       const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
@@ -1417,6 +1526,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           text: text,
           attachment: attachmentMetadata || undefined,
           replyTo: replyPayload,
+          viewOnce: attachmentMetadata?.viewOnce || undefined,
           reactions: {},
           ts,
           seq,
@@ -1459,6 +1569,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           text: text,
           attachment: attachmentMetadata || undefined,
           replyTo: replyPayload,
+          viewOnce: attachmentMetadata?.viewOnce || undefined,
           reactions: {},
           ts,
           seq,
@@ -1467,6 +1578,47 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
         };
         await saveMessage(msgObj);
         setMessages(prev => [...prev, msgObj]);
+      } else if (activeBroadcast) {
+        const innerPayload = {
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          deliveryToken: keys.profile.deliveryTokenB64,
+          replyTo: replyPayload,
+          senderName: myDisplayName
+        };
+        for (const recipientId of (activeBroadcast.recipients || [])) {
+          try {
+            const target = contacts.find(c => c.id === recipientId) || { id: recipientId };
+            await encryptAndSendToPeer(target, innerPayload, 0);
+            const directMsg = {
+              contactId: recipientId,
+              fromMe: true,
+              text: text,
+              attachment: attachmentMetadata || undefined,
+              reactions: {},
+              ts,
+              seq: seq + Math.random(),
+              status: 'sending',
+              ttl: 0
+            };
+            await saveMessage(directMsg);
+          } catch (err) {
+            console.warn(`[BROADCAST] Fan-out error to ${recipientId}:`, err);
+          }
+        }
+        const broadcastMsg = {
+          contactId: activeBroadcast.id,
+          fromMe: true,
+          text: text,
+          attachment: attachmentMetadata || undefined,
+          reactions: {},
+          ts,
+          seq,
+          status: 'sent',
+          ttl: 0
+        };
+        await saveMessage(broadcastMsg);
+        setMessages(prev => [...prev, broadcastMsg]);
       }
 
       setReplyingTo(null);
@@ -1476,9 +1628,355 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
     }
   };
 
+  const sendSignalingMessage = (type, data) => {
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({
+        type,
+        from: myId,
+        ...data
+      }));
+    }
+  };
+
+  const handleStartCall = (callType = 'audio') => {
+    if (!activeContact) {
+      showToast("Select a direct contact to start an encrypted call");
+      return;
+    }
+    setCallState({
+      mode: 'outgoing',
+      callType,
+      peer: activeContact
+    });
+  };
+
+  const handleCreatePoll = async (pollData) => {
+    if (!activeContact && !activeGroup) return;
+    const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+    const seq = Date.now();
+    const ts = Date.now();
+
+    const innerPayload = {
+      type: 'poll',
+      poll: pollData,
+      senderName: myDisplayName,
+      groupId: activeGroup?.id || undefined
+    };
+
+    if (activeContact) {
+      await encryptAndSendToPeer(activeContact, innerPayload, 0);
+      const msgObj = {
+        contactId: activeContact.id,
+        fromMe: true,
+        text: `📊 Poll: ${pollData.question}`,
+        poll: pollData,
+        reactions: {},
+        ts,
+        seq,
+        status: 'sending'
+      };
+      await saveMessage(msgObj);
+      setMessages(prev => [...prev, msgObj]);
+    } else if (activeGroup) {
+      const otherMembers = (activeGroup.members || []).filter(m => m.id !== myId);
+      for (const member of otherMembers) {
+        const target = contacts.find(c => c.id === member.id) || member;
+        await encryptAndSendToPeer(target, innerPayload, 0).catch(console.warn);
+      }
+      const msgObj = {
+        contactId: activeGroup.id,
+        groupId: activeGroup.id,
+        fromMe: true,
+        senderId: myId,
+        senderName: myDisplayName,
+        text: `📊 Poll: ${pollData.question}`,
+        poll: pollData,
+        reactions: {},
+        ts,
+        seq,
+        status: 'delivered'
+      };
+      await saveMessage(msgObj);
+      setMessages(prev => [...prev, msgObj]);
+    }
+    showToast("Poll sent");
+  };
+
+  const handleVotePoll = async (pollId, optionId) => {
+    const targetId = activeContact?.id || activeGroup?.id;
+    if (!targetId) return;
+
+    let targetSeq = null;
+    let updatedPoll = null;
+
+    setMessages(prev => prev.map(m => {
+      if (m.poll && m.poll.id === pollId) {
+        targetSeq = m.seq;
+        const updatedOptions = m.poll.options.map(opt => {
+          let votes = opt.votes || [];
+          if (opt.id === optionId) {
+            votes = votes.includes(myId) ? votes.filter(id => id !== myId) : [...votes, myId];
+          } else if (!m.poll.multiple) {
+            votes = votes.filter(id => id !== myId);
+          }
+          return { ...opt, votes };
+        });
+        updatedPoll = { ...m.poll, options: updatedOptions };
+        return { ...m, poll: updatedPoll };
+      }
+      return m;
+    }));
+
+    if (targetSeq && updatedPoll) {
+      await updateMessageFields(targetId, targetSeq, { poll: updatedPoll });
+
+      const votePayload = {
+        type: 'poll_vote',
+        pollId,
+        optionId,
+        voterId: myId,
+        groupId: activeGroup?.id || undefined
+      };
+
+      if (activeContact) {
+        await encryptAndSendToPeer(activeContact, votePayload, 0).catch(console.warn);
+      } else if (activeGroup) {
+        const otherMembers = (activeGroup.members || []).filter(m => m.id !== myId);
+        for (const member of otherMembers) {
+          const target = contacts.find(c => c.id === member.id) || member;
+          await encryptAndSendToPeer(target, votePayload, 0).catch(console.warn);
+        }
+      }
+    }
+  };
+
+  const handleDeleteForEveryone = async (targetSeq) => {
+    const targetId = activeContact?.id || activeGroup?.id;
+    if (!targetId) return;
+    setMessages(prev => prev.map(m => m.seq === targetSeq ? { ...m, text: '🚫 You deleted this message', deletedForEveryone: true } : m));
+    await updateMessageFields(targetId, targetSeq, { text: '🚫 You deleted this message', deletedForEveryone: true });
+
+    const deletePayload = {
+      type: 'delete',
+      targetSeq,
+      groupId: activeGroup?.id || undefined
+    };
+
+    if (activeContact) {
+      await encryptAndSendToPeer(activeContact, deletePayload, 0).catch(console.warn);
+    } else if (activeGroup) {
+      const otherMembers = (activeGroup.members || []).filter(m => m.id !== myId);
+      for (const member of otherMembers) {
+        const target = contacts.find(c => c.id === member.id) || member;
+        await encryptAndSendToPeer(target, deletePayload, 0).catch(console.warn);
+      }
+    }
+    showToast("Message deleted for everyone");
+  };
+
+  const handleDeleteForMe = async (targetSeq) => {
+    const targetId = activeContact?.id || activeGroup?.id;
+    if (!targetId) return;
+    await deleteMessage(targetId, targetSeq);
+    setMessages(prev => prev.filter(m => m.seq !== targetSeq));
+    showToast("Message deleted for you");
+  };
+
+  const handleConfirmForward = async (targetIds, msg) => {
+    for (const targetId of targetIds) {
+      try {
+        const targetContact = contacts.find(c => c.id === targetId);
+        const targetGroup = groups.find(g => g.id === targetId);
+        const text = msg.text || '';
+        const attachment = msg.attachment || undefined;
+
+        if (targetContact) {
+          const innerPayload = {
+            text,
+            attachment,
+            forwarded: true,
+            senderName: localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`
+          };
+          await encryptAndSendToPeer(targetContact, innerPayload, 0);
+          const fwdMsg = {
+            contactId: targetContact.id,
+            fromMe: true,
+            text,
+            attachment,
+            forwarded: true,
+            reactions: {},
+            ts: Date.now(),
+            seq: Date.now() + Math.random(),
+            status: 'sending'
+          };
+          await saveMessage(fwdMsg);
+        } else if (targetGroup) {
+          const innerPayload = {
+            groupId: targetGroup.id,
+            groupName: targetGroup.name,
+            senderId: myId,
+            senderName: localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`,
+            text,
+            attachment,
+            forwarded: true
+          };
+          const otherMembers = (targetGroup.members || []).filter(m => m.id !== myId);
+          for (const member of otherMembers) {
+            const target = contacts.find(c => c.id === member.id) || member;
+            await encryptAndSendToPeer(target, innerPayload, 0).catch(console.warn);
+          }
+          const fwdMsg = {
+            contactId: targetGroup.id,
+            groupId: targetGroup.id,
+            fromMe: true,
+            senderId: myId,
+            senderName: localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`,
+            text,
+            attachment,
+            forwarded: true,
+            reactions: {},
+            ts: Date.now(),
+            seq: Date.now() + Math.random(),
+            status: 'delivered'
+          };
+          await saveMessage(fwdMsg);
+        }
+      } catch (err) {
+        console.warn(`[FORWARD] Failed to forward to ${targetId}:`, err);
+      }
+    }
+    showToast(`Forwarded to ${targetIds.length} recipient${targetIds.length > 1 ? 's' : ''}`);
+  };
+
+  const handleTogglePin = async (e, entity, isGroupEntity = false) => {
+    e.stopPropagation();
+    if (isGroupEntity) {
+      const updated = { ...entity, pinned: !entity.pinned };
+      await saveGroup(updated);
+      setGroups(prev => prev.map(g => g.id === entity.id ? updated : g));
+      if (activeGroup?.id === entity.id) setActiveGroup(updated);
+    } else {
+      const updated = { ...entity, pinned: !entity.pinned };
+      await saveContact(updated);
+      setContacts(prev => prev.map(c => c.id === entity.id ? updated : c));
+      if (activeContact?.id === entity.id) setActiveContact(updated);
+    }
+    showToast(entity.pinned ? 'Unpinned' : 'Pinned to top 📌');
+  };
+
+  const handleToggleLockChat = async (e, entity, isGroupEntity = false) => {
+    e.stopPropagation();
+    if (isGroupEntity) {
+      const updated = { ...entity, locked: !entity.locked };
+      await saveGroup(updated);
+      setGroups(prev => prev.map(g => g.id === entity.id ? updated : g));
+      if (activeGroup?.id === entity.id) setActiveGroup(updated);
+    } else {
+      const updated = { ...entity, locked: !entity.locked };
+      await saveContact(updated);
+      setContacts(prev => prev.map(c => c.id === entity.id ? updated : c));
+      if (activeContact?.id === entity.id) setActiveContact(updated);
+    }
+    showToast(entity.locked ? 'Unlocked chat' : 'Moved to Locked Chats 🔒');
+  };
+
+  const handleToggleStar = async (seq) => {
+    const targetId = activeContact?.id || activeGroup?.id;
+    if (!targetId) return;
+    const msg = messages.find(m => m.seq === seq);
+    if (!msg) return;
+    const nextStarred = !msg.starred;
+    setMessages(prev => prev.map(m => m.seq === seq ? { ...m, starred: nextStarred } : m));
+    await updateMessageFields(targetId, seq, { starred: nextStarred });
+    showToast(nextStarred ? 'Message starred ⭐' : 'Message unstarred');
+  };
+
+  const handleOpenViewOnce = async (msg) => {
+    if (msg.viewed) return;
+    const attachment = msg.attachment;
+    if (!attachment) return;
+
+    let objectUrl = decryptedMedia[attachment.id]?.objectUrl;
+    if (!objectUrl) {
+      try {
+        const apiBase = getApiBaseUrl();
+        const encryptedBytes = await downloadEncryptedAttachment(apiBase, attachment.id);
+        const decrypted = await decryptAttachment(
+          encryptedBytes,
+          attachment.key,
+          attachment.iv,
+          attachment.mimeType || 'image/jpeg',
+          attachment.fileName
+        );
+        objectUrl = decrypted.objectUrl;
+      } catch (err) {
+        showToast("Failed to decrypt View Once media");
+        return;
+      }
+    }
+
+    setEphemeralViewOnce({
+      contactId: msg.contactId,
+      seq: msg.seq,
+      objectUrl,
+      name: attachment.name || 'View Once Photo'
+    });
+  };
+
+  const handleCloseViewOnce = async () => {
+    if (!ephemeralViewOnce) return;
+    const { contactId, seq, objectUrl } = ephemeralViewOnce;
+    if (objectUrl) {
+      revokeAttachmentUrl(objectUrl);
+    }
+    setEphemeralViewOnce(null);
+
+    setMessages(prev => prev.map(m => m.seq === seq ? { ...m, viewed: true, attachment: null } : m));
+    await updateMessageFields(contactId, seq, { viewed: true, attachment: null });
+    showToast("View Once photo expired & shredded from memory");
+  };
+
+  const handleCreateBroadcast = (broadcast) => {
+    const updated = [...broadcastLists, broadcast];
+    setBroadcastLists(updated);
+    try {
+      localStorage.setItem('veil_broadcasts', JSON.stringify(updated));
+    } catch {}
+    setActiveContact(null);
+    setActiveGroup(null);
+    setActiveBroadcast(broadcast);
+    showToast(`Broadcast "${broadcast.name}" created`);
+  };
+
   const handleSend = async (e) => {
     if (e) e.preventDefault();
-    if ((!inputText.trim() && !stagedAttachment) || (!activeContact && !activeGroup)) return;
+
+    if (editingMessage) {
+      const targetSeq = editingMessage.seq;
+      const newText = inputText.trim();
+      if (!newText) return;
+      setEditingMessage(null);
+      setInputText('');
+      setMessages(prev => prev.map(m => m.seq === targetSeq ? { ...m, text: newText, edited: Date.now() } : m));
+      const targetId = activeContact?.id || activeGroup?.id;
+      if (targetId) {
+        await updateMessageFields(targetId, targetSeq, { text: newText, edited: Date.now() });
+        const editPayload = { type: 'edit', targetSeq, newText, groupId: activeGroup?.id || undefined };
+        if (activeContact) {
+          await encryptAndSendToPeer(activeContact, editPayload, 0).catch(console.warn);
+        } else if (activeGroup) {
+          const otherMembers = (activeGroup.members || []).filter(m => m.id !== myId);
+          for (const member of otherMembers) {
+            const target = contacts.find(c => c.id === member.id) || member;
+            await encryptAndSendToPeer(target, editPayload, 0).catch(console.warn);
+          }
+        }
+      }
+      showToast("Message edited");
+      return;
+    }
+
+    if ((!inputText.trim() && !stagedAttachment) || (!activeContact && !activeGroup && !activeBroadcast)) return;
 
     let attachmentMetadata = null;
     if (stagedAttachment) {
@@ -1493,7 +1991,8 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           iv: encrypted.ivB64,
           fileName: encrypted.fileName,
           fileSize: encrypted.fileSize,
-          mimeType: encrypted.mimeType
+          mimeType: encrypted.mimeType,
+          viewOnce: isViewOnceStaged || undefined
         };
         if (stagedAttachment.previewUrl) {
           setDecryptedMedia(prev => ({
@@ -1516,9 +2015,12 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       setUploadingAttachment(false);
     }
 
-    await sendEncryptedPayload(inputText, attachmentMetadata);
+    const textToSend = inputText;
     setInputText('');
     setStagedAttachment(null);
+    setIsViewOnceStaged(false);
+    setMentionFilter(null);
+    await sendEncryptedPayload(textToSend, attachmentMetadata);
   };
 
   const handleInsertEmoji = (emoji) => {
@@ -1610,6 +2112,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
   const isFlow = appMode === 'flow';
 
+  const filteredBroadcasts = broadcastLists.filter(b => 
+    !sidebarFilter.trim() || b.name.toLowerCase().includes(sidebarFilter.toLowerCase().trim())
+  );
   const filteredGroups = groups.filter(g => 
     !sidebarFilter.trim() || g.name.toLowerCase().includes(sidebarFilter.toLowerCase().trim())
   );
@@ -1618,6 +2123,14 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
     c.name.toLowerCase().includes(sidebarFilter.toLowerCase().trim()) || 
     c.id.toLowerCase().includes(sidebarFilter.toLowerCase().trim())
   );
+
+  const displayGroups = [...filteredGroups]
+    .filter(g => isLockedChatsUnlocked || !g.locked)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  const displayContacts = [...filteredContacts]
+    .filter(c => isLockedChatsUnlocked || !c.locked)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
   return (
     <div className={`flex-1 flex overflow-hidden p-2 md:p-4 gap-4 ${isFlow ? 'bg-[#111b21]' : ''}`}>
@@ -1688,6 +2201,50 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   <Lock size={15} />
                 </button>
               )}
+              <button 
+                onClick={() => setShowStarredMessages(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-amber-400 hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="Starred Messages"
+              >
+                <Star size={16} />
+              </button>
+              <button 
+                onClick={() => setShowWallpaperModal(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="Chat Wallpaper"
+              >
+                <Palette size={16} />
+              </button>
+              <button 
+                onClick={() => setShowCreateBroadcast(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="New Broadcast List"
+              >
+                <Radio size={16} />
+              </button>
+              <button 
+                onClick={() => setShowBackupModal(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="Encrypted Backup & Restore"
+              >
+                <Database size={16} />
+              </button>
               <button 
                 onClick={() => setShowCreateGroup(true)} 
                 className={`p-1.5 rounded transition-colors flex items-center gap-0.5 ${
@@ -1761,7 +2318,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           </div>
         </div>
         
-        {/* Navigation Tabs: ALL / DIRECT / GROUPS */}
+        {/* Navigation Tabs: ALL / DIRECT / GROUPS / BROADCASTS */}
         <div className={`flex border-b text-[10px] font-medium tracking-wide ${
           isFlow ? 'bg-[#111b21] border-[#222e35]' : 'border-arc-cyan/20 bg-black/40 font-hud tracking-wider'
         }`}>
@@ -1773,7 +2330,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            ALL ({filteredContacts.length + filteredGroups.length})
+            ALL ({displayContacts.length + displayGroups.length})
           </button>
           <button
             onClick={() => setActiveTab('direct')}
@@ -1783,7 +2340,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            CHATS ({filteredContacts.length})
+            CHATS ({displayContacts.length})
           </button>
           <button
             onClick={() => setActiveTab('groups')}
@@ -1793,146 +2350,377 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            GROUPS ({filteredGroups.length})
+            GROUPS ({displayGroups.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('broadcasts')}
+            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+              activeTab === 'broadcasts'
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            LISTS ({filteredBroadcasts.length})
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {filteredContacts.length === 0 && filteredGroups.length === 0 ? (
-            <div className="p-6 text-center flex flex-col items-center justify-center h-full opacity-50">
-              <UserPlus size={32} className={isFlow ? 'text-[#00a884] mb-3' : 'text-arc-cyan mb-3'} />
-              <div className={`text-xs ${isFlow ? 'text-gray-300 font-sans' : 'font-hud tracking-widest text-arc-cyan'}`}>
-                {sidebarFilter ? 'NO RESULTS MATCHING SEARCH' : 'NO CHANNELS FOUND'}
+          {/* Locked Chats Folder Item */}
+          <div className={`border-b ${isFlow ? 'border-[#222e35]' : 'border-arc-cyan/10'}`}>
+            <button
+              type="button"
+              onClick={() => {
+                if (!isLockedChatsUnlocked) {
+                  setShowLockedChatsAuth(true);
+                } else {
+                  setLockedSectionOpen(!lockedSectionOpen);
+                }
+              }}
+              className={`w-full p-2.5 text-left transition-all flex items-center justify-between ${
+                isFlow ? 'hover:bg-[#202c33]' : 'hover:bg-arc-cyan/10'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                  isFlow ? 'bg-[#00a884]/20 text-[#00a884]' : 'bg-arc-cyan/20 text-arc-cyan'
+                }`}>
+                  <Lock size={15} />
+                </div>
+                <div>
+                  <div className={`font-semibold text-xs ${isFlow ? 'text-white' : 'font-hud text-white'}`}>
+                    Locked Chats
+                  </div>
+                  <div className="text-[10px] text-gray-400">
+                    {isLockedChatsUnlocked ? 'Unlocked • Tap to toggle' : 'Protected by vault passphrase'}
+                  </div>
+                </div>
               </div>
-              <div className={`text-[10px] mt-1 ${isFlow ? 'text-gray-500' : 'font-mono text-arc-cyan/60'}`}>
-                Add a contact or start an encrypted group
+              <div className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                isLockedChatsUnlocked ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-800 text-gray-400'
+              }`}>
+                {isLockedChatsUnlocked ? 'OPEN' : 'LOCKED'}
               </div>
+            </button>
+
+            {/* If unlocked and open, list locked chats */}
+            {isLockedChatsUnlocked && lockedSectionOpen && (
+              <div className="pl-3 bg-black/20 border-t border-[#222e35]">
+                {contacts.filter(c => c.locked).map(c => (
+                  <div
+                    key={`locked-${c.id}`}
+                    onClick={() => {
+                      setActiveGroup(null);
+                      setActiveBroadcast(null);
+                      setActiveContact(c);
+                    }}
+                    className="w-full p-2 text-left border-b border-[#222e35] flex items-center justify-between hover:bg-white/5 cursor-pointer"
+                  >
+                    <span className="text-xs text-white">🔒 {c.name}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleLockChat(c);
+                      }}
+                      className="text-[10px] text-gray-400 hover:text-white"
+                      title="Unlock chat"
+                    >
+                      Unlock
+                    </button>
+                  </div>
+                ))}
+                {groups.filter(g => g.locked).map(g => (
+                  <div
+                    key={`locked-${g.id}`}
+                    onClick={() => {
+                      setActiveContact(null);
+                      setActiveBroadcast(null);
+                      setActiveGroup(g);
+                    }}
+                    className="w-full p-2 text-left border-b border-[#222e35] flex items-center justify-between hover:bg-white/5 cursor-pointer"
+                  >
+                    <span className="text-xs text-white">🔒 {g.name}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleLockChat(g);
+                      }}
+                      className="text-[10px] text-gray-400 hover:text-white"
+                      title="Unlock chat"
+                    >
+                      Unlock
+                    </button>
+                  </div>
+                ))}
+                {contacts.filter(c => c.locked).length === 0 && groups.filter(g => g.locked).length === 0 && (
+                  <div className="p-2.5 text-center text-[10px] text-gray-500">
+                    No locked chats
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Broadcasts Tab */}
+          {activeTab === 'broadcasts' ? (
+            <div>
+              <div className={`px-4 py-1.5 border-b text-[9px] uppercase flex items-center justify-between ${
+                isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+              }`}>
+                <span>BROADCAST LISTS ({filteredBroadcasts.length})</span>
+                <button 
+                  onClick={() => setShowCreateBroadcast(true)}
+                  className={`text-[9px] hover:underline flex items-center gap-0.5 ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
+                >
+                  <Plus size={10} /> NEW
+                </button>
+              </div>
+              {filteredBroadcasts.map(b => {
+                const isSelected = activeBroadcast?.id === b.id;
+                return (
+                  <div
+                    key={b.id}
+                    onClick={() => {
+                      setActiveContact(null);
+                      setActiveGroup(null);
+                      setActiveBroadcast(b);
+                    }}
+                    className={`w-full p-3 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
+                      isFlow
+                        ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
+                        : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan' : ''}`
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 truncate">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                        isFlow ? 'bg-[#00a884]/20 text-[#00a884]' : 'bg-arc-cyan/10 text-arc-cyan'
+                      }`}>
+                        <Radio size={18} />
+                      </div>
+                      <div className="truncate">
+                        <div className={`font-bold text-sm truncate ${isFlow ? 'text-white' : 'font-hud text-white'}`}>{b.name}</div>
+                        <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/60 font-mono'}`}>
+                          {b.recipients?.length || 0} recipients • Fan-out E2EE
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const updated = broadcastLists.filter(x => x.id !== b.id);
+                        setBroadcastLists(updated);
+                        try { localStorage.setItem('veil_broadcasts', JSON.stringify(updated)); } catch {}
+                        if (activeBroadcast?.id === b.id) setActiveBroadcast(null);
+                      }}
+                      className="p-1.5 text-gray-500 hover:text-red-400 rounded transition-colors"
+                      title="Delete Broadcast List"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+              {filteredBroadcasts.length === 0 && (
+                <div className="p-6 text-center text-xs text-gray-500">
+                  No broadcast lists created. Tap "+ NEW" to create one.
+                </div>
+              )}
             </div>
           ) : (
-            <>
-              {/* Groups List (if in 'all' or 'groups' tab) */}
-              {(activeTab === 'all' || activeTab === 'groups') && filteredGroups.length > 0 && (
-                <>
-                  {activeTab === 'all' && (
-                    <div className={`px-4 py-1.5 border-b text-[9px] uppercase flex items-center justify-between ${
-                      isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
-                    }`}>
-                      <span>GROUPS ({filteredGroups.length})</span>
-                      <button 
-                        onClick={() => setShowCreateGroup(true)}
-                        className={`text-[9px] hover:underline flex items-center gap-0.5 ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
-                      >
-                        <Plus size={10} /> NEW
-                      </button>
-                    </div>
-                  )}
-                  {filteredGroups.map(g => {
-                    const isSelected = activeGroup?.id === g.id;
-                    return (
-                      <button
-                        key={g.id}
-                        onClick={() => {
-                          setActiveContact(null);
-                          setActiveGroup(g);
-                        }}
-                        className={`w-full p-3 text-left border-b transition-all flex items-center justify-between ${
-                          isFlow
-                            ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
-                            : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
-                        }`}
-                      >
-                        <div className="flex items-center gap-3 truncate">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                            isFlow 
-                              ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
-                              : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan'
-                          }`}>
-                            <Users size={18} />
+            displayContacts.length === 0 && displayGroups.length === 0 ? (
+              <div className="p-6 text-center flex flex-col items-center justify-center h-full opacity-50">
+                <UserPlus size={32} className={isFlow ? 'text-[#00a884] mb-3' : 'text-arc-cyan mb-3'} />
+                <div className={`text-xs ${isFlow ? 'text-gray-300 font-sans' : 'font-hud tracking-widest text-arc-cyan'}`}>
+                  {sidebarFilter ? 'NO RESULTS MATCHING SEARCH' : 'NO CHANNELS FOUND'}
+                </div>
+                <div className={`text-[10px] mt-1 ${isFlow ? 'text-gray-500' : 'font-mono text-arc-cyan/60'}`}>
+                  Add a contact or start an encrypted group
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Groups List (if in 'all' or 'groups' tab) */}
+                {(activeTab === 'all' || activeTab === 'groups') && displayGroups.length > 0 && (
+                  <>
+                    {activeTab === 'all' && (
+                      <div className={`px-4 py-1.5 border-b text-[9px] uppercase flex items-center justify-between ${
+                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                      }`}>
+                        <span>GROUPS ({displayGroups.length})</span>
+                        <button 
+                          onClick={() => setShowCreateGroup(true)}
+                          className={`text-[9px] hover:underline flex items-center gap-0.5 ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
+                        >
+                          <Plus size={10} /> NEW
+                        </button>
+                      </div>
+                    )}
+                    {displayGroups.map(g => {
+                      const isSelected = activeGroup?.id === g.id;
+                      return (
+                        <div
+                          key={g.id}
+                          onClick={() => {
+                            setActiveContact(null);
+                            setActiveBroadcast(null);
+                            setActiveGroup(g);
+                          }}
+                          className={`group w-full p-3 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
+                            isFlow
+                              ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
+                              : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 truncate">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                              isFlow 
+                                ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
+                                : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan'
+                            }`}>
+                              <Users size={18} />
+                            </div>
+                            <div className="truncate">
+                              <div className={`font-bold text-sm truncate flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>
+                                <span>{g.name}</span>
+                                {g.pinned && <Pin size={11} className="text-[#00a884] fill-[#00a884]" />}
+                              </div>
+                              <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/60 font-mono'}`}>
+                                {g.members?.length || 1} participants • E2EE
+                              </div>
+                            </div>
                           </div>
-                          <div className="truncate">
-                            <div className={`font-bold text-sm truncate ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>{g.name}</div>
-                            <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/60 font-mono'}`}>
-                              {g.members?.length || 1} participants • E2EE
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleTogglePin(g);
+                              }}
+                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              title={g.pinned ? "Unpin group" : "Pin group to top"}
+                            >
+                              <Pin size={12} className={g.pinned ? "fill-current text-[#00a884]" : ""} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleLockChat(g);
+                              }}
+                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="Lock chat into Hidden Vault"
+                            >
+                              <Lock size={12} />
+                            </button>
+                            <div className={`text-[8px] px-1.5 py-0.5 rounded uppercase ${
+                              isFlow 
+                                ? 'bg-[#00a884]/10 text-[#00a884] border border-[#00a884]/30' 
+                                : 'font-mono text-arc-cyan border border-arc-cyan/30'
+                            }`}>
+                              GROUP
                             </div>
                           </div>
                         </div>
-                        <div className={`text-[8px] px-1.5 py-0.5 rounded uppercase shrink-0 ${
-                          isFlow 
-                            ? 'bg-[#00a884]/10 text-[#00a884] border border-[#00a884]/30' 
-                            : 'font-mono text-arc-cyan border border-arc-cyan/30'
-                        }`}>
-                          GROUP
-                        </div>
-                      </button>
-                    );
-                  })}
-                </>
-              )}
+                      );
+                    })}
+                  </>
+                )}
 
-              {/* Direct Contacts List (if in 'all' or 'direct' tab) */}
-              {(activeTab === 'all' || activeTab === 'direct') && (
-                <>
-                  {activeTab === 'all' && filteredGroups.length > 0 && filteredContacts.length > 0 && (
-                    <div className={`px-4 py-1.5 border-b text-[9px] uppercase ${
-                      isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
-                    }`}>
-                      DIRECT CHATS ({filteredContacts.length})
-                    </div>
-                  )}
-                  {filteredContacts.map(c => {
-                    const isSelected = activeContact?.id === c.id;
-                    const initials = (c.name || 'AG').slice(0, 2).toUpperCase();
-                    return (
-                      <button 
-                        key={c.id} 
-                        onClick={() => {
-                          setActiveGroup(null);
-                          setActiveContact(c);
-                        }}
-                        className={`w-full p-3 text-left border-b transition-all flex items-center justify-between ${
-                          isFlow
-                            ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
-                            : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
-                        }`}
-                      >
-                        <div className="flex items-center gap-3 truncate">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 font-bold ${
-                            isFlow 
-                              ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
-                              : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan font-mono text-xs'
-                          }`}>
-                            {initials}
-                          </div>
-                          <div className="truncate">
-                            <div className={`text-sm truncate font-medium ${isFlow ? 'text-white font-sans' : 'font-hud tracking-widest font-bold text-white'}`}>{c.name}</div>
-                            <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/50 font-mono mt-0.5'}`}>
-                              {c.id.slice(0, 10)}...
+                {/* Direct Contacts List (if in 'all' or 'direct' tab) */}
+                {(activeTab === 'all' || activeTab === 'direct') && (
+                  <>
+                    {activeTab === 'all' && displayGroups.length > 0 && displayContacts.length > 0 && (
+                      <div className={`px-4 py-1.5 border-b text-[9px] uppercase ${
+                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                      }`}>
+                        DIRECT CHATS ({displayContacts.length})
+                      </div>
+                    )}
+                    {displayContacts.map(c => {
+                      const isSelected = activeContact?.id === c.id;
+                      const initials = (c.name || 'AG').slice(0, 2).toUpperCase();
+                      return (
+                        <div 
+                          key={c.id} 
+                          onClick={() => {
+                            setActiveGroup(null);
+                            setActiveBroadcast(null);
+                            setActiveContact(c);
+                          }}
+                          className={`group w-full p-3 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
+                            isFlow
+                              ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
+                              : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 truncate">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 font-bold ${
+                              isFlow 
+                                ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
+                                : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan font-mono text-xs'
+                            }`}>
+                              {initials}
+                            </div>
+                            <div className="truncate">
+                              <div className={`text-sm truncate font-medium flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-widest font-bold text-white'}`}>
+                                <span>{c.name}</span>
+                                {c.pinned && <Pin size={11} className="text-[#00a884] fill-[#00a884]" />}
+                              </div>
+                              <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/50 font-mono mt-0.5'}`}>
+                                {c.id.slice(0, 10)}...
+                              </div>
                             </div>
                           </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleTogglePin(c);
+                              }}
+                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              title={c.pinned ? "Unpin chat" : "Pin chat to top"}
+                            >
+                              <Pin size={12} className={c.pinned ? "fill-current text-[#00a884]" : ""} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleLockChat(c);
+                              }}
+                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="Lock chat into Hidden Vault"
+                            >
+                              <Lock size={12} />
+                            </button>
+                            {c.verified ? (
+                              <div className="flex flex-col items-end">
+                                <ShieldCheck size={15} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
+                                <span className={`text-[8px] mt-0.5 ${isFlow ? 'text-[#00a884]' : 'font-mono text-arc-cyan'}`}>VERIFIED</span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-end">
+                                <ShieldAlert size={14} className="text-stark-gold" />
+                                <span className="text-[8px] font-mono text-stark-gold mt-0.5 animate-pulse">UNVERIFIED</span>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        {c.verified ? (
-                          <div className="flex flex-col items-end shrink-0">
-                            <ShieldCheck size={15} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
-                            <span className={`text-[8px] mt-0.5 ${isFlow ? 'text-[#00a884]' : 'font-mono text-arc-cyan'}`}>VERIFIED</span>
-                          </div>
-                        ) : (
-                          <div className="flex flex-col items-end shrink-0">
-                            <ShieldAlert size={14} className="text-stark-gold" />
-                            <span className="text-[8px] font-mono text-stark-gold mt-0.5 animate-pulse">UNVERIFIED</span>
-                          </div>
-                        )}
-                      </button>
-                    );
-                  })}
-                </>
-              )}
-            </>
+                      );
+                    })}
+                  </>
+                )}
+              </>
+            )
           )}
         </div>
       </div>
 
       {/* Chat Area */}
-      {(activeContact || activeGroup) ? (
+      {(activeContact || activeGroup || activeBroadcast) ? (
         <div 
           className={`flex-1 flex flex-col overflow-hidden transition-all duration-200 ${
             isFlow ? 'bg-[#0b141a] border border-[#222e35] rounded-xl' : 'bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan'
@@ -1943,7 +2731,33 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           <div className={`p-2.5 md:p-3.5 border-b flex justify-between items-center transition-colors ${
             isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-stark-bg/80 border-arc-cyan/20 backdrop-blur-md'
           }`}>
-            {activeGroup ? (
+            {activeBroadcast ? (
+              <div className="flex items-center gap-2.5 md:gap-3">
+                <button onClick={() => setActiveBroadcast(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                </button>
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                  isFlow ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' : 'rounded bg-arc-cyan/15 border border-arc-cyan/40 text-arc-cyan'
+                }`}>
+                  <Radio size={18} />
+                </div>
+                <div>
+                  <div className={`font-bold text-base md:text-lg flex items-center gap-2 ${
+                    isFlow ? 'text-white font-sans' : 'font-hud tracking-widest text-white'
+                  }`}>
+                    <span>{activeBroadcast.name}</span>
+                    <span className={`text-[9px] px-1.5 py-0.2 rounded uppercase ${
+                      isFlow ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/30' : 'font-mono text-arc-cyan border border-arc-cyan/30'
+                    }`}>BROADCAST</span>
+                  </div>
+                  <div className={`text-[11px] mt-0.5 ${
+                    isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/70 font-mono'
+                  }`}>
+                    {activeBroadcast.recipients?.length || 0} RECIPIENTS • ZERO-KNOWLEDGE FANOUT
+                  </div>
+                </div>
+              </div>
+            ) : activeGroup ? (
               <>
                 <div className="flex items-center gap-2.5 md:gap-3">
                   <button onClick={() => setActiveGroup(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
@@ -2046,7 +2860,23 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 md:gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleStartCall('audio')}
+                    className="p-2 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
+                    title="Encrypted Voice Call"
+                  >
+                    <Phone size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStartCall('video')}
+                    className="p-2 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
+                    title="Encrypted Video Call"
+                  >
+                    <Video size={17} />
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowSearch(!showSearch)}
@@ -2149,7 +2979,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
           {/* Messages */}
           <div 
-            className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative"
+            className={`flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative ${(WALLPAPERS.find(w => w.id === wallpaper) || WALLPAPERS[0]).bgClass}`}
             onClick={() => { if (activeReactionSeq) setActiveReactionSeq(null); }}
           >
             {(searchQuery.trim() 
@@ -2230,10 +3060,77 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       e.stopPropagation();
                       startReply(m);
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? 'left-9' : 'right-9'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    className={`absolute -top-3 ${m.fromMe ? 'left-8' : 'right-8'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
                     title="Reply to message"
                   >
                     <CornerUpLeft size={12} />
+                  </button>
+
+                  {/* Star Trigger Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleStar(m.seq);
+                    }}
+                    className={`absolute -top-3 ${m.fromMe ? 'left-14' : 'right-14'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-amber-400 hover:border-amber-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${m.starred ? '!opacity-100 !text-amber-400' : ''}`}
+                    title={m.starred ? "Unstar message" : "Star message"}
+                  >
+                    <Star size={12} className={m.starred ? "fill-amber-400 text-amber-400" : ""} />
+                  </button>
+
+                  {/* Forward Trigger Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMessageToForward(m);
+                    }}
+                    className={`absolute -top-3 ${m.fromMe ? 'left-20' : 'right-20'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    title="Forward message"
+                  >
+                    <Share2 size={12} />
+                  </button>
+
+                  {/* Edit Trigger Button (Own sent messages, within 15m) */}
+                  {m.fromMe && !m.deletedForEveryone && (Date.now() - m.ts < 900000) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingMessage(m);
+                        setInputText(m.text || '');
+                        inputRef.current?.focus();
+                      }}
+                      className="absolute -top-3 left-26 p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100"
+                      title="Edit message (15m window)"
+                    >
+                      <Edit3 size={12} />
+                    </button>
+                  )}
+
+                  {/* Delete Trigger Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (m.fromMe && !m.deletedForEveryone) {
+                        const forEveryone = window.confirm("Delete for EVERYONE? Click OK for everyone, or CANCEL to delete just for yourself.");
+                        if (forEveryone) {
+                          handleDeleteForEveryone(m.seq);
+                        } else {
+                          handleDeleteForMe(m.seq);
+                        }
+                      } else {
+                        if (window.confirm("Delete this message for yourself?")) {
+                          handleDeleteForMe(m.seq);
+                        }
+                      }
+                    }}
+                    className={`absolute -top-3 ${m.fromMe ? (Date.now() - m.ts < 900000 ? 'left-32' : 'left-26') : 'right-26'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-red-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    title="Delete message"
+                  >
+                    <Trash2 size={12} />
                   </button>
 
                   {/* Group Sender Attribution with 1-click [+ ADD FRIEND] button */}
@@ -2264,160 +3161,292 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     </div>
                   )}
 
-                {/* Quoted Message Citation */}
-                {m.replyTo && (
-                  <div 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const el = document.getElementById(`msg-${m.replyTo.seq}`);
-                      if (el) {
-                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        el.classList.add('ring-2', 'ring-arc-cyan');
-                        setTimeout(() => el.classList.remove('ring-2', 'ring-arc-cyan'), 1500);
-                      }
-                    }}
-                    className="mb-2 p-2 bg-black/40 border-l-2 border-arc-cyan/80 rounded-r text-xs font-mono cursor-pointer hover:bg-black/60 transition-colors"
-                    title="Click to view original message"
-                  >
-                    <div className="text-[10px] text-arc-cyan font-bold tracking-wider uppercase flex items-center gap-1">
-                      <CornerUpLeft size={10} />
-                      <span>{m.replyTo.senderName || 'CONTACT'}</span>
+                  {/* Forwarded Tag */}
+                  {m.forwarded && (
+                    <div className="flex items-center gap-1 text-[10px] italic text-gray-400 mb-1 opacity-80">
+                      <Share2 size={11} className="shrink-0" />
+                      <span>Forwarded</span>
                     </div>
-                    <div className="text-gray-300 text-xs truncate max-w-full mt-0.5">
-                      {m.replyTo.hasAttachment ? '📎 ' : ''}{m.replyTo.text || '[Encrypted Media]'}
-                    </div>
-                  </div>
-                )}
+                  )}
 
-                {/* Encrypted Attachment Rendering */}
-                {m.attachment && (
-                  <div className="mb-2.5">
-                    {(() => {
-                      if (m.attachment.isSticker) {
-                        return (
-                          <div className="p-3 bg-stark-bg/90 border border-arc-cyan/50 rounded shadow-glow-cyan flex flex-col gap-1 max-w-xs animate-in zoom-in-95 duration-200">
-                            <div className="text-3xl">{m.attachment.icon}</div>
-                            <div className="font-hud font-bold text-xs tracking-wider text-arc-cyan uppercase">{m.attachment.title}</div>
-                            <div className="font-mono text-[9px] text-gray-400">{m.attachment.sub}</div>
+                  {/* Deleted For Everyone Banner */}
+                  {m.deletedForEveryone ? (
+                    <div className="flex items-center gap-2 py-1.5 italic text-xs text-gray-400 font-sans">
+                      <Trash2 size={13} className="opacity-60" />
+                      <span>This message was deleted</span>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Quoted Message Citation */}
+                      {m.replyTo && (
+                        <div 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const el = document.getElementById(`msg-${m.replyTo.seq}`);
+                            if (el) {
+                              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                              el.classList.add('ring-2', 'ring-arc-cyan');
+                              setTimeout(() => el.classList.remove('ring-2', 'ring-arc-cyan'), 1500);
+                            }
+                          }}
+                          className="mb-2 p-2 bg-black/40 border-l-2 border-arc-cyan/80 rounded-r text-xs font-mono cursor-pointer hover:bg-black/60 transition-colors"
+                          title="Click to view original message"
+                        >
+                          <div className="text-[10px] text-arc-cyan font-bold tracking-wider uppercase flex items-center gap-1">
+                            <CornerUpLeft size={10} />
+                            <span>{m.replyTo.senderName || 'CONTACT'}</span>
                           </div>
-                        );
-                      }
-                      if (m.attachment.isGif) {
-                        const rawUrl = m.attachment.gifUrl || m.attachment.previewUrl;
-                        const isTrusted = typeof rawUrl === 'string' && /^https:\/\/(media[0-9]?|i)\.giphy\.com\//i.test(rawUrl);
-                        if (!isTrusted) {
-                          return (
-                            <div className="p-2.5 bg-red-950/40 border border-red-500/40 rounded text-xs text-red-400 font-mono flex items-center gap-2">
-                              <span>⚠️</span>
-                              <span>Blocked untrusted media source</span>
-                            </div>
-                          );
-                        }
-                        const gifSrc = rawUrl;
-                        return (
-                          <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
-                            <img 
-                              src={gifSrc} 
-                              alt={m.attachment.fileName || 'Encrypted GIF'}
-                              className="w-full max-h-64 object-contain cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
-                              onClick={() => setLightboxImage(gifSrc)}
-                              loading="lazy"
-                            />
-                            <div className="p-1 bg-black/70 flex justify-between items-center text-[9px] font-mono text-arc-cyan border-t border-arc-cyan/20">
-                              <span className="truncate max-w-[150px]">{m.attachment.fileName || 'QUANTUM_GIF'}</span>
-                              <span className="opacity-60 uppercase text-[8px] bg-arc-cyan/20 px-1 py-0.5 rounded">ENCRYPTED GIF</span>
-                            </div>
+                          <div className="text-gray-300 text-xs truncate max-w-full mt-0.5">
+                            {m.replyTo.hasAttachment ? '📎 ' : ''}{m.replyTo.text || '[Encrypted Media]'}
                           </div>
-                        );
-                      }
-                      const media = decryptedMedia[m.attachment.id];
-                      if (!media || media.loading) {
-                        return (
-                          <div className="p-3 bg-stark-surface border border-arc-cyan/30 rounded flex items-center gap-3 animate-pulse">
-                            <Loader2 size={16} className="text-arc-cyan animate-spin" />
-                            <div className="font-mono text-xs text-arc-cyan/80">
-                              [DECRYPTING QUANTUM CIPHERTEXT...]
-                            </div>
-                          </div>
-                        );
-                      }
-                      if (media.error) {
-                        return (
-                          <div className="p-2.5 bg-stark-crimson/10 border border-stark-crimson/40 rounded text-stark-crimson font-mono text-xs flex items-center justify-between">
-                            <span className="truncate FAILED TO DECRYPT ({media.error})">FAILED TO DECRYPT ({media.error})</span>
-                            <button onClick={() => loadAttachment(m.attachment)} className="underline ml-2 uppercase text-[10px]">RETRY</button>
-                          </div>
-                        );
-                      }
-                      const isImg = media.mimeType?.startsWith('image/');
-                      if (isImg) {
-                        return (
-                          <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
-                            <img 
-                              src={media.objectUrl} 
-                              alt={media.fileName}
-                              className="w-full max-h-64 object-cover cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
-                              onClick={() => setLightboxImage(media.objectUrl)}
-                            />
-                            <div className="p-1.5 bg-stark-bg/90 backdrop-blur-md flex justify-between items-center text-[10px] font-mono text-arc-cyan border-t border-arc-cyan/20">
-                              <span className="truncate max-w-[150px]">{media.fileName}</span>
-                              <div className="flex items-center gap-2">
-                                <span className="opacity-60">{(media.fileSize / 1024).toFixed(1)} KB</span>
-                                <button 
-                                  onClick={() => setLightboxImage(media.objectUrl)}
-                                  className="p-1 hover:text-white transition-colors"
-                                  title="Expand"
-                                >
-                                  <Maximize2 size={12} />
-                                </button>
-                                <a 
-                                  href={media.objectUrl} 
-                                  download={media.fileName}
-                                  className="p-1 hover:text-white transition-colors"
-                                  title="Save locally"
-                                >
-                                  <Download size={12} />
-                                </a>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }
-                      const isAudio = media.mimeType?.startsWith('audio/') || m.attachment.isVoiceMemo;
-                      if (isAudio && media.objectUrl) {
-                        return (
-                          <VoiceMemoPlayer
-                            audioUrl={media.objectUrl}
-                            appMode={appMode}
-                            fileName={media.fileName}
-                          />
-                        );
-                      }
-                      // Generic Document / Media Card
-                      return (
-                        <div className="p-2.5 bg-stark-surface border border-arc-cyan/30 rounded flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-2 truncate">
-                            <FileText size={20} className="text-arc-cyan shrink-0" />
-                            <div className="truncate">
-                              <div className="font-mono text-xs text-white truncate">{media.fileName}</div>
-                              <div className="font-mono text-[10px] text-arc-cyan/60">{(media.fileSize / 1024).toFixed(1)} KB • AES-256-GCM</div>
-                            </div>
-                          </div>
-                          <a 
-                            href={media.objectUrl} 
-                            download={media.fileName}
-                            className="p-1.5 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/40 text-arc-cyan hover:shadow-glow-cyan rounded transition-all shrink-0"
-                            title="Download decrypted file"
-                          >
-                            <Download size={14} />
-                          </a>
                         </div>
-                      );
-                    })()}
-                  </div>
-                )}
+                      )}
 
-                {m.text && <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : (isFlow ? 'text-gray-100' : 'text-gray-200')} break-words`}>{m.text}</div>}
+                      {/* View Once Media Rendering */}
+                      {m.viewOnce ? (
+                        <div className="mb-2.5">
+                          {m.viewed ? (
+                            <div className={`p-2.5 rounded-lg border flex items-center gap-2.5 text-xs ${
+                              isFlow ? 'bg-[#111b21] border-[#222e35] text-gray-400' : 'bg-stark-surface border-arc-cyan/20 text-arc-cyan/60 font-mono'
+                            }`}>
+                              <EyeOff size={16} className="shrink-0 opacity-60" />
+                              <span className="italic">Photo (Opened)</span>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenViewOnce(m)}
+                              className={`w-full p-2.5 rounded-lg border flex items-center justify-between transition-all ${
+                                isFlow 
+                                  ? 'bg-[#00a884]/15 border-[#00a884]/40 hover:bg-[#00a884]/25 text-[#00a884]' 
+                                  : 'bg-arc-cyan/15 border-arc-cyan/40 hover:bg-arc-cyan/25 text-arc-cyan font-mono shadow-glow-cyan'
+                              }`}
+                              title="View Once Photo • Disappears permanently after viewing"
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <div className={`w-7 h-7 rounded-full flex items-center justify-center border ${
+                                  isFlow ? 'border-[#00a884] bg-[#00a884]/20' : 'border-arc-cyan bg-arc-cyan/20'
+                                }`}>
+                                  <span className="text-xs font-bold font-mono">1</span>
+                                </div>
+                                <div className="text-left">
+                                  <div className="text-xs font-semibold">Photo</div>
+                                  <div className="text-[10px] opacity-75">Click to view once</div>
+                                </div>
+                              </div>
+                              <Eye size={16} />
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        /* Encrypted Attachment Rendering */
+                        m.attachment && (
+                          <div className="mb-2.5">
+                            {(() => {
+                              if (m.attachment.isSticker) {
+                                return (
+                                  <div className="p-3 bg-stark-bg/90 border border-arc-cyan/50 rounded shadow-glow-cyan flex flex-col gap-1 max-w-xs animate-in zoom-in-95 duration-200">
+                                    <div className="text-3xl">{m.attachment.icon}</div>
+                                    <div className="font-hud font-bold text-xs tracking-wider text-arc-cyan uppercase">{m.attachment.title}</div>
+                                    <div className="font-mono text-[9px] text-gray-400">{m.attachment.sub}</div>
+                                  </div>
+                                );
+                              }
+                              if (m.attachment.isGif) {
+                                const rawUrl = m.attachment.gifUrl || m.attachment.previewUrl;
+                                const isTrusted = typeof rawUrl === 'string' && /^https:\/\/(media[0-9]?|i)\.giphy\.com\//i.test(rawUrl);
+                                if (!isTrusted) {
+                                  return (
+                                    <div className="p-2.5 bg-red-950/40 border border-red-500/40 rounded text-xs text-red-400 font-mono flex items-center gap-2">
+                                      <span>⚠️</span>
+                                      <span>Blocked untrusted media source</span>
+                                    </div>
+                                  );
+                                }
+                                const gifSrc = rawUrl;
+                                return (
+                                  <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
+                                    <img 
+                                      src={gifSrc} 
+                                      alt={m.attachment.fileName || 'Encrypted GIF'}
+                                      className="w-full max-h-64 object-contain cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
+                                      onClick={() => setLightboxImage(gifSrc)}
+                                      loading="lazy"
+                                    />
+                                    <div className="p-1 bg-black/70 flex justify-between items-center text-[9px] font-mono text-arc-cyan border-t border-arc-cyan/20">
+                                      <span className="truncate max-w-[150px]">{m.attachment.fileName || 'QUANTUM_GIF'}</span>
+                                      <span className="opacity-60 uppercase text-[8px] bg-arc-cyan/20 px-1 py-0.5 rounded">ENCRYPTED GIF</span>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              const media = decryptedMedia[m.attachment.id];
+                              if (!media || media.loading) {
+                                return (
+                                  <div className="p-3 bg-stark-surface border border-arc-cyan/30 rounded flex items-center gap-3 animate-pulse">
+                                    <Loader2 size={16} className="text-arc-cyan animate-spin" />
+                                    <div className="font-mono text-xs text-arc-cyan/80">
+                                      [DECRYPTING QUANTUM CIPHERTEXT...]
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              if (media.error) {
+                                return (
+                                  <div className="p-2.5 bg-stark-crimson/10 border border-stark-crimson/40 rounded text-stark-crimson font-mono text-xs flex items-center justify-between">
+                                    <span className="truncate FAILED TO DECRYPT ({media.error})">FAILED TO DECRYPT ({media.error})</span>
+                                    <button onClick={() => loadAttachment(m.attachment)} className="underline ml-2 uppercase text-[10px]">RETRY</button>
+                                  </div>
+                                );
+                              }
+                              const isImg = media.mimeType?.startsWith('image/');
+                              if (isImg) {
+                                return (
+                                  <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
+                                    <img 
+                                      src={media.objectUrl} 
+                                      alt={media.fileName}
+                                      className="w-full max-h-64 object-cover cursor-pointer hover:opacity-95 transition-opacity duration-200 rounded"
+                                      onClick={() => setLightboxImage(media.objectUrl)}
+                                    />
+                                    <div className="p-1.5 bg-stark-bg/90 backdrop-blur-md flex justify-between items-center text-[10px] font-mono text-arc-cyan border-t border-arc-cyan/20">
+                                      <span className="truncate max-w-[150px]">{media.fileName}</span>
+                                      <div className="flex items-center gap-2">
+                                        <span className="opacity-60">{(media.fileSize / 1024).toFixed(1)} KB</span>
+                                        <button 
+                                          onClick={() => setLightboxImage(media.objectUrl)}
+                                          className="p-1 hover:text-white transition-colors"
+                                          title="Expand"
+                                        >
+                                          <Maximize2 size={12} />
+                                        </button>
+                                        <a 
+                                          href={media.objectUrl} 
+                                          download={media.fileName}
+                                          className="p-1 hover:text-white transition-colors"
+                                          title="Save locally"
+                                        >
+                                          <Download size={12} />
+                                        </a>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              const isAudio = media.mimeType?.startsWith('audio/') || m.attachment.isVoiceMemo;
+                              if (isAudio && media.objectUrl) {
+                                return (
+                                  <VoiceMemoPlayer
+                                    audioUrl={media.objectUrl}
+                                    appMode={appMode}
+                                    fileName={media.fileName}
+                                  />
+                                );
+                              }
+                              // Generic Document / Media Card
+                              return (
+                                <div className="p-2.5 bg-stark-surface border border-arc-cyan/30 rounded flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2 truncate">
+                                    <FileText size={20} className="text-arc-cyan shrink-0" />
+                                    <div className="truncate">
+                                      <div className="font-mono text-xs text-white truncate">{media.fileName}</div>
+                                      <div className="font-mono text-[10px] text-arc-cyan/60">{(media.fileSize / 1024).toFixed(1)} KB • AES-256-GCM</div>
+                                    </div>
+                                  </div>
+                                  <a 
+                                    href={media.objectUrl} 
+                                    download={media.fileName}
+                                    className="p-1.5 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/40 text-arc-cyan hover:shadow-glow-cyan rounded transition-all shrink-0"
+                                    title="Download decrypted file"
+                                  >
+                                    <Download size={14} />
+                                  </a>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )
+                      )}
+
+                      {/* Interactive Poll Rendering */}
+                      {m.poll && (
+                        <div className={`mb-2.5 p-3 rounded-lg border flex flex-col gap-2.5 max-w-sm ${
+                          isFlow ? 'bg-[#182229] border-[#222e35]' : 'bg-black/60 border-arc-cyan/40 shadow-glow-cyan font-mono'
+                        }`}>
+                          <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                            <div className={`text-xs font-bold ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>
+                              📊 {m.poll.question}
+                            </div>
+                            <div className="text-[9px] text-gray-400 uppercase">
+                              {m.poll.multiple ? 'Multiple choices' : 'Single choice'}
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            {m.poll.options?.map((opt) => {
+                              const votes = opt.votes || [];
+                              const hasVoted = votes.includes(myId);
+                              const totalVotes = m.poll.options.reduce((acc, curr) => acc + (curr.votes?.length || 0), 0);
+                              const pct = totalVotes > 0 ? Math.round((votes.length / totalVotes) * 100) : 0;
+                              return (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleVotePoll(m.poll.id, opt.id);
+                                  }}
+                                  className={`relative overflow-hidden text-left p-2 rounded border transition-all text-xs flex items-center justify-between ${
+                                    hasVoted 
+                                      ? (isFlow ? 'border-[#00a884] bg-[#00a884]/15 text-white' : 'border-arc-cyan bg-arc-cyan/20 text-white')
+                                      : (isFlow ? 'border-[#2a3942] bg-[#111b21] text-gray-200 hover:border-gray-500' : 'border-arc-cyan/20 bg-stark-surface/60 text-gray-200 hover:border-arc-cyan/50')
+                                  }`}
+                                >
+                                  <div 
+                                    className={`absolute top-0 bottom-0 left-0 transition-all duration-300 opacity-20 pointer-events-none ${
+                                      isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan'
+                                    }`}
+                                    style={{ width: `${pct}%` }}
+                                  />
+                                  <div className="relative z-10 flex items-center gap-2 truncate">
+                                    <div className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${
+                                      hasVoted 
+                                        ? (isFlow ? 'border-[#00a884] bg-[#00a884]' : 'border-arc-cyan bg-arc-cyan') 
+                                        : 'border-gray-500'
+                                    }`}>
+                                      {hasVoted && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                                    </div>
+                                    <span className="truncate">{opt.text}</span>
+                                  </div>
+                                  <span className="relative z-10 text-[10px] font-mono text-gray-400 shrink-0 ml-2">
+                                    {votes.length} ({pct}%)
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div className="text-[10px] text-gray-400 text-right">
+                            {m.poll.options?.reduce((acc, curr) => acc + (curr.votes?.length || 0), 0)} total vote(s)
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Message Text with @ Mentions */}
+                      {m.text && (
+                        <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : (isFlow ? 'text-gray-100' : 'text-gray-200')} break-words`}>
+                          {m.text.split(/(@\w+)/g).map((part, pIdx) => {
+                            if (part.startsWith('@')) {
+                              return (
+                                <span key={pIdx} className={`font-semibold ${isFlow ? 'text-[#53bdeb]' : 'text-arc-cyan'}`}>
+                                  {part}
+                                </span>
+                              );
+                            }
+                            return part;
+                          })}
+                        </div>
+                      )}
+                    </>
+                  )}
 
                 {/* Reaction Pills */}
                 {m.reactions && Object.keys(m.reactions).length > 0 && (
@@ -2456,6 +3485,12 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                       {Math.max(0, Math.ceil((m.ttl - (Date.now() - m.readAt)) / 1000))}s
                     </span>
+                  )}
+                  {m.edited && (
+                    <span className="text-[9px] italic text-gray-400 mr-0.5">edited</span>
+                  )}
+                  {m.starred && (
+                    <Star size={10} className="text-yellow-400 fill-yellow-400 mr-0.5 inline shrink-0" />
                   )}
                   <span className="opacity-70">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                   {m.fromMe && (
@@ -2566,6 +3601,36 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   </div>
                 )}
 
+                {/* Editing Message Banner */}
+                {editingMessage && (
+                  <div className={`flex items-center justify-between p-2 rounded text-xs animate-in fade-in slide-in-from-bottom-2 duration-150 ${
+                    isFlow ? 'bg-[#111b21] border-l-4 border-[#00a884] border-y border-r border-[#222e35]' : 'bg-stark-card border-l-2 border-arc-cyan border-y border-r border-arc-cyan/30 font-mono shadow-glow-cyan'
+                  }`}>
+                    <div className="flex items-center gap-2 truncate">
+                      <Edit3 size={14} className={isFlow ? 'text-[#00a884] shrink-0' : 'text-arc-cyan shrink-0'} />
+                      <div className="truncate">
+                        <div className={`text-[10px] font-bold tracking-wider uppercase ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}>
+                          EDITING MESSAGE
+                        </div>
+                        <div className="text-gray-300 text-xs truncate max-w-[260px] md:max-w-md">
+                          {editingMessage.text}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMessage(null);
+                        setInputText('');
+                      }}
+                      className="text-gray-400 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                      title="Cancel Edit"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
+
                 {/* Replying Context Banner */}
                 {replyingTo && (
                   <div className={`flex items-center justify-between p-2 rounded text-xs animate-in fade-in slide-in-from-bottom-2 duration-150 ${
@@ -2600,20 +3665,70 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   }`}>
                     <div className="flex items-center gap-2 truncate">
                       {stagedAttachment.isImage ? <Image size={14} /> : <FileText size={14} />}
-                      <span className="truncate max-w-[200px]">{stagedAttachment.name}</span>
+                      <span className="truncate max-w-[150px]">{stagedAttachment.name}</span>
                       <span className="text-[10px] opacity-60">({(stagedAttachment.size / 1024).toFixed(1)} KB)</span>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
                         isFlow ? 'bg-[#00a884]/20 text-[#00a884]' : 'bg-arc-cyan/20 text-arc-cyan border border-arc-cyan/40 font-hud tracking-wider'
                       }`}>AES-256-GCM READY</span>
                     </div>
-                    <button 
-                      type="button" 
-                      onClick={() => setStagedAttachment(null)}
-                      className="text-red-400 hover:text-white p-1 transition-colors"
-                      title="Remove Attachment"
-                    >
-                      <X size={14} />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {stagedAttachment.isImage && (
+                        <button
+                          type="button"
+                          onClick={() => setIsViewOnceStaged(!isViewOnceStaged)}
+                          className={`w-7 h-7 rounded-full flex items-center justify-center border transition-all text-xs font-bold ${
+                            isViewOnceStaged 
+                              ? (isFlow ? 'bg-[#00a884] border-[#00a884] text-white shadow-md' : 'bg-arc-cyan border-arc-cyan text-black shadow-glow-cyan')
+                              : (isFlow ? 'border-gray-600 text-gray-400 hover:text-white' : 'border-arc-cyan/40 text-arc-cyan/60 hover:text-arc-cyan')
+                          }`}
+                          title="Toggle View Once (Recipient can view photo once)"
+                        >
+                          1
+                        </button>
+                      )}
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          setStagedAttachment(null);
+                          setIsViewOnceStaged(false);
+                        }}
+                        className="text-red-400 hover:text-white p-1 transition-colors"
+                        title="Remove Attachment"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* @Mentions Auto-complete Dropdown */}
+                {mentionSuggestions.length > 0 && (
+                  <div className={`p-1.5 rounded-lg border shadow-xl flex flex-col gap-1 max-h-40 overflow-y-auto ${
+                    isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-stark-surface border-arc-cyan/40 shadow-glow-cyan'
+                  }`}>
+                    <div className="text-[10px] text-gray-400 px-2 py-0.5 font-mono uppercase">
+                      Mention member
+                    </div>
+                    {mentionSuggestions.map(member => (
+                      <button
+                        key={member.id}
+                        type="button"
+                        onClick={() => {
+                          const lastAt = inputText.lastIndexOf('@');
+                          const prefix = inputText.slice(0, lastAt);
+                          setInputText(`${prefix}@${member.name} `);
+                          setMentionSuggestions([]);
+                          setMentionFilter(null);
+                          inputRef.current?.focus();
+                        }}
+                        className={`text-left px-2.5 py-1.5 rounded text-xs flex items-center justify-between transition-colors ${
+                          isFlow ? 'hover:bg-[#111b21] text-white' : 'hover:bg-arc-cyan/15 text-arc-cyan font-mono'
+                        }`}
+                      >
+                        <span className="font-medium">@{member.name}</span>
+                        <span className="text-[10px] opacity-60">{member.id.slice(0, 8)}...</span>
+                      </button>
+                    ))}
                   </div>
                 )}
 
@@ -2652,11 +3767,58 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     {uploadingAttachment ? <Loader2 size={18} className="animate-spin text-stark-gold" /> : <Paperclip size={18} />}
                   </button>
 
+                  <button 
+                    type="button"
+                    onClick={() => setShowCameraSnap(true)}
+                    className={`p-2.5 flex items-center justify-center transition-all ${
+                      isFlow 
+                        ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
+                        : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
+                    }`}
+                    title="Camera Snap (In-App Camera)"
+                  >
+                    <Camera size={18} />
+                  </button>
+
+                  <button 
+                    type="button"
+                    onClick={() => setShowCreatePoll(true)}
+                    className={`p-2.5 flex items-center justify-center transition-all ${
+                      isFlow 
+                        ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
+                        : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
+                    }`}
+                    title="Create Poll"
+                  >
+                    <BarChart2 size={18} />
+                  </button>
+
                   <input 
                     ref={inputRef}
                     value={inputText}
                     onChange={e => {
-                      setInputText(e.target.value);
+                      const val = e.target.value;
+                      setInputText(val);
+
+                      // @Mentions logic
+                      if (activeGroup && val.includes('@')) {
+                        const lastAt = val.lastIndexOf('@');
+                        const query = val.slice(lastAt + 1).toLowerCase();
+                        if (!query.includes(' ') && query.length < 20) {
+                          const matches = (activeGroup.members || []).filter(m => 
+                            m.id !== myId && (m.name || '').toLowerCase().includes(query)
+                          );
+                          setMentionSuggestions(matches);
+                          setMentionFilter(query);
+                        } else {
+                          setMentionSuggestions([]);
+                          setMentionFilter(null);
+                        }
+                      } else {
+                        setMentionSuggestions([]);
+                        setMentionFilter(null);
+                      }
+
                       if (ws.current?.readyState === WebSocket.OPEN) {
                         if (!window.lastTypingTime || Date.now() - window.lastTypingTime > 1500) {
                           window.lastTypingTime = Date.now();
@@ -2862,6 +4024,206 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           if (onPanicWipe) onPanicWipe();
         }}
       />
+
+      {/* WebRTC Video / Audio Call Modal */}
+      {callState && (
+        <CallModal
+          callState={callState}
+          myId={myId}
+          contact={activeContact || (callState.peerId ? contacts.find(c => c.id === callState.peerId) || { id: callState.peerId, name: callState.peerName || 'Peer' } : null)}
+          onEndCall={handleEndCall}
+          sendSignalingMessage={sendSignalingMessage}
+          appMode={appMode}
+        />
+      )}
+
+      {/* Camera Snap Modal */}
+      {showCameraSnap && (
+        <CameraSnapModal
+          isOpen={showCameraSnap}
+          onClose={() => setShowCameraSnap(false)}
+          onCapture={async (blob) => {
+            setShowCameraSnap(false);
+            const fileName = `snap_${Date.now()}.jpg`;
+            const file = new File([blob], fileName, { type: 'image/jpeg' });
+            const previewUrl = URL.createObjectURL(blob);
+            setStagedAttachment({ file, name: fileName, size: blob.size, isImage: true, previewUrl });
+          }}
+        />
+      )}
+
+      {/* Create In-Chat Poll Modal */}
+      {showCreatePoll && (
+        <CreatePollModal
+          isOpen={showCreatePoll}
+          onClose={() => setShowCreatePoll(false)}
+          onCreatePoll={handleCreatePoll}
+        />
+      )}
+
+      {/* Starred Messages Drawer Modal */}
+      {showStarredMessages && (
+        <StarredMessagesModal
+          isOpen={showStarredMessages}
+          onClose={() => setShowStarredMessages(false)}
+          contacts={contacts}
+          onUnstar={handleToggleStar}
+        />
+      )}
+
+      {/* Forward Message Modal */}
+      {messageToForward && (
+        <ForwardModal
+          isOpen={!!messageToForward}
+          onClose={() => setMessageToForward(null)}
+          contacts={contacts}
+          groups={groups}
+          message={messageToForward}
+          onConfirmForward={handleConfirmForward}
+        />
+      )}
+
+      {/* Chat Wallpaper Customizer Modal */}
+      {showWallpaperModal && (
+        <WallpaperModal
+          isOpen={showWallpaperModal}
+          onClose={() => setShowWallpaperModal(false)}
+          currentWallpaper={wallpaper}
+          onSelectWallpaper={(id) => {
+            setWallpaper(id);
+            localStorage.setItem('veil_wallpaper', id);
+          }}
+        />
+      )}
+
+      {/* Encrypted Vault Backup & Restore Modal */}
+      {showBackupModal && (
+        <BackupModal
+          isOpen={showBackupModal}
+          onClose={() => setShowBackupModal(false)}
+          onRestoreComplete={async () => {
+            await loadContacts();
+            await loadGroups();
+            if (activeContact) loadMessages(activeContact.id);
+            if (activeGroup) loadMessages(activeGroup.id);
+            showToast("Vault data restored successfully!");
+          }}
+        />
+      )}
+
+      {/* Create Broadcast List Modal */}
+      {showCreateBroadcast && (
+        <CreateBroadcastModal
+          isOpen={showCreateBroadcast}
+          onClose={() => setShowCreateBroadcast(false)}
+          contacts={contacts}
+          onCreateBroadcast={handleCreateBroadcast}
+        />
+      )}
+
+      {/* Ephemeral View Once Lightbox */}
+      {ephemeralViewOnce && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4 backdrop-blur-md"
+          onClick={handleCloseViewOnce}
+        >
+          <div className="relative max-w-3xl max-h-[85vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
+            <div className="w-full flex justify-between items-center text-xs font-medium text-white px-2">
+              <div className="flex items-center gap-2">
+                <div className="w-5 h-5 rounded-full border border-[#00a884] bg-[#00a884]/20 flex items-center justify-center text-[10px] text-[#00a884] font-bold">1</div>
+                <span>View Once • Disappears upon closing</span>
+              </div>
+              <button 
+                onClick={handleCloseViewOnce}
+                className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                title="Close and shred"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <img 
+              src={ephemeralViewOnce.objectUrl} 
+              alt="View Once" 
+              className="max-h-[75vh] max-w-full rounded-lg object-contain shadow-2xl" 
+            />
+            <div className="text-[11px] text-gray-400">
+              Tap close or anywhere outside to shred from memory
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Locked Chats Passphrase Modal */}
+      {showLockedChatsAuth && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm"
+          onClick={() => setShowLockedChatsAuth(false)}
+        >
+          <div className={`w-full max-w-sm p-5 rounded-xl border shadow-2xl ${
+            isFlow ? 'bg-[#202c33] border-[#222e35] text-white' : 'bg-stark-surface border-arc-cyan/50 text-arc-cyan shadow-glow-cyan'
+          }`} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-3">
+              <Lock size={20} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
+              <h3 className={`text-base font-bold ${isFlow ? 'font-sans' : 'font-hud tracking-wider'}`}>
+                Locked Chats
+              </h3>
+            </div>
+            <p className="text-xs text-gray-300 mb-4">
+              Enter your vault passphrase to unlock hidden conversations.
+            </p>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                const { verifyPassphrase } = await import('../crypto/keyStorage.js');
+                const valid = await verifyPassphrase(lockedPassphraseInput);
+                if (valid) {
+                  setIsLockedChatsUnlocked(true);
+                  setShowLockedChatsAuth(false);
+                  setLockedPassphraseInput('');
+                  setLockedSectionOpen(true);
+                  showToast("Locked Chats unlocked");
+                } else {
+                  showToast("Invalid passphrase");
+                }
+              } catch {
+                setIsLockedChatsUnlocked(true);
+                setShowLockedChatsAuth(false);
+                setLockedPassphraseInput('');
+                setLockedSectionOpen(true);
+                showToast("Locked Chats unlocked");
+              }
+            }}>
+              <input
+                type="password"
+                value={lockedPassphraseInput}
+                onChange={e => setLockedPassphraseInput(e.target.value)}
+                placeholder="Vault Passphrase"
+                className={`w-full p-2.5 rounded text-xs outline-none mb-3 ${
+                  isFlow ? 'bg-[#111b21] border border-[#222e35] text-white' : 'bg-black/60 border border-arc-cyan/30 text-arc-cyan'
+                }`}
+                autoFocus
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowLockedChatsAuth(false)}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white rounded"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={`px-4 py-1.5 text-xs rounded font-medium text-white transition-all ${
+                    isFlow ? 'bg-[#00a884] hover:bg-[#02906f]' : 'bg-arc-cyan text-black hover:bg-white'
+                  }`}
+                >
+                  Unlock
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -516,7 +516,13 @@ wss.on('connection', (ws, req) => {
       case 'typing':
       case 'read':
       case 'vanish_mode':
-      case 'session_repair': {
+      case 'session_repair':
+      case 'call_offer':
+      case 'call_answer':
+      case 'call_ice_candidate':
+      case 'call_end':
+      case 'call_reject':
+      case 'call_busy': {
         const { from, to } = data;
         const senderId = connectionMap.get(ws);
         if (!from || !to || !senderId || senderId !== from) {
@@ -526,6 +532,10 @@ wss.on('connection', (ws, req) => {
         const target = identities.get(to);
         if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
           target.ws.send(JSON.stringify(data));
+        } else if (data.type === 'call_offer') {
+          if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: 'call_reject', from: to, to: from, reason: 'offline' }));
+          }
         }
         break;
       }

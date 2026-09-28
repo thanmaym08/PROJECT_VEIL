@@ -9,7 +9,8 @@ export default function GroupInfoModal({
   onAddMembers, 
   onAddFriendFromGroup, 
   onDirectMessage, 
-  onLeaveGroup 
+  onLeaveGroup,
+  onUpdateGroupPermissions
 }) {
   const [copied, setCopied] = useState(false);
   const [showAddMore, setShowAddMore] = useState(false);
@@ -175,6 +176,29 @@ export default function GroupInfoModal({
             </div>
           )}
 
+          {/* Group Admin Permissions Panel */}
+          {((group.createdBy === myId) || (group.admins || []).includes(myId)) && (
+            <div className="p-3 border border-arc-cyan/30 bg-arc-cyan/5 rounded mb-3">
+              <div className="text-[10px] font-hud tracking-widest text-arc-cyan uppercase mb-1.5 flex items-center gap-1.5 font-bold">
+                <ShieldCheck size={14} />
+                <span>ADMIN CONTROLS</span>
+              </div>
+              <label className="flex items-center justify-between cursor-pointer text-xs text-gray-200">
+                <span>Announcement Only (Only Admins Can Send)</span>
+                <input
+                  type="checkbox"
+                  checked={!!group.announcementOnly}
+                  onChange={(e) => {
+                    if (onUpdateGroupPermissions) {
+                      onUpdateGroupPermissions(group.id, { announcementOnly: e.target.checked });
+                    }
+                  }}
+                  className="w-4 h-4 accent-[#00a884] cursor-pointer"
+                />
+              </label>
+            </div>
+          )}
+
           {/* Group Roster / Members List */}
           <div>
             <div className="text-[10px] font-hud tracking-widest text-arc-cyan uppercase mb-2">
@@ -184,7 +208,8 @@ export default function GroupInfoModal({
               {(group.members || []).map((m) => {
                 const isMe = m.id === myId;
                 const isFriend = contacts.some(c => c.id === m.id) || addedFriends[m.id];
-                const isAdmin = group.createdBy === m.id || m.role === 'admin';
+                const isAdmin = group.createdBy === m.id || m.role === 'admin' || (group.admins || []).includes(m.id);
+                const isCurrentAdmin = (group.createdBy === myId) || (group.admins || []).includes(myId);
 
                 return (
                   <div key={m.id} className="p-3 flex items-center justify-between hover:bg-arc-cyan/5 transition-colors">
@@ -207,9 +232,27 @@ export default function GroupInfoModal({
                     </div>
 
                     {/* Action buttons for this member */}
-                    {!isMe && (
-                      <div className="flex items-center gap-1.5">
-                        {isFriend ? (
+                    <div className="flex items-center gap-1.5">
+                      {!isMe && isCurrentAdmin && group.createdBy !== m.id && (
+                        <button
+                          title={isAdmin ? "Dismiss as Admin" : "Make Group Admin"}
+                          onClick={() => {
+                            const currentAdmins = group.admins || [];
+                            const newAdmins = isAdmin
+                              ? currentAdmins.filter(a => a !== m.id)
+                              : [...currentAdmins, m.id];
+                            if (onUpdateGroupPermissions) {
+                              onUpdateGroupPermissions(group.id, { admins: newAdmins });
+                            }
+                          }}
+                          className="px-1.5 py-0.5 border border-stark-gold/40 text-stark-gold hover:bg-stark-gold/20 text-[9px] font-mono transition-colors"
+                        >
+                          {isAdmin ? 'REVOKE' : '+ADMIN'}
+                        </button>
+                      )}
+
+                      {!isMe && (
+                        isFriend ? (
                           <button
                             title="Start Direct Chat"
                             onClick={() => {
@@ -231,9 +274,9 @@ export default function GroupInfoModal({
                             <UserPlus size={11} />
                             <span>+ ADD FRIEND</span>
                           </button>
-                        )}
-                      </div>
-                    )}
+                        )
+                      )}
+                    </div>
                   </div>
                 );
               })}

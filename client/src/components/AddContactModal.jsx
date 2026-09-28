@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { QRCodeSVG } from 'qrcode.react';
 import { X, Camera, Image as ImageIcon, Download, Share2, CheckCircle2, AlertTriangle, Copy, ArrowRight, RefreshCw, Upload, Sparkles } from 'lucide-react';
 import { Clipboard } from '@capacitor/clipboard';
@@ -82,14 +82,17 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
       setIsCameraActive(true);
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      const html5QrCode = new Html5Qrcode("camera-reader");
+      const html5QrCode = new Html5Qrcode("camera-reader", {
+        formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
+        verbose: false
+      });
       html5QrCodeRef.current = html5QrCode;
 
       const qrConfig = { 
-        fps: 15, 
+        fps: 20, 
         qrbox: (viewfinderWidth, viewfinderHeight) => {
           const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          const qrEdge = Math.max(180, Math.floor(minEdge * 0.85));
+          const qrEdge = Math.max(160, Math.floor(minEdge * 0.85));
           return { width: qrEdge, height: qrEdge };
         }
       };
@@ -320,7 +323,6 @@ export default function AddContactModal({ myId, keys, onClose, onAdd }) {
   const myData = JSON.stringify({
     id: myId,
     nickname: keys.nickname,
-    mlkemPub: keys.mlkem.publicKeyB64,
     x25519Pub: keys.x25519.publicKeyB64,
     ed25519Pub: keys.ed25519.publicKeyB64
   });

@@ -87,11 +87,23 @@ export const statements = {
   `)
 };
 
+export function saveOneTimePreKeys(cipherId, oneTimePreKeys) {
+  if (!oneTimePreKeys || oneTimePreKeys.length === 0) return;
+  const insertOpks = db.transaction((id, opks) => {
+    for (const opk of opks) {
+      statements.insertOneTimePreKey.run(id, opk.id, opk.pub);
+    }
+  });
+  insertOpks(cipherId, oneTimePreKeys);
+}
+
 export function savePreKeyBundle(cipherId, identityMlkemPub, identityX25519Pub, identityEd25519Pub, deliveryToken, fcmToken, bundle) {
   const insertMany = db.transaction((cipherId, identMlkem, identX, identEd, deliv, fcm, b) => {
-    statements.upsertUser.run(cipherId, identMlkem, identX, identEd, deliv, fcm, Date.now());
+    if (identMlkem && identX) {
+      statements.upsertUser.run(cipherId, identMlkem, identX, identEd, deliv, fcm, Date.now());
+    }
     
-    if (b.signedPreKey) {
+    if (b && b.signedPreKey && b.signedPqPreKey) {
       statements.upsertSignedPreKeys.run(
         cipherId, 
         b.signedPreKey.pub, b.signedPreKey.sig, 
@@ -100,7 +112,7 @@ export function savePreKeyBundle(cipherId, identityMlkemPub, identityX25519Pub, 
       );
     }
     
-    if (b.oneTimePreKeys && b.oneTimePreKeys.length > 0) {
+    if (b && b.oneTimePreKeys && b.oneTimePreKeys.length > 0) {
       for (const opk of b.oneTimePreKeys) {
         statements.insertOneTimePreKey.run(cipherId, opk.id, opk.pub);
       }

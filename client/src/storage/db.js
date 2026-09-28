@@ -1,3 +1,85 @@
+import { getActiveVaultKey } from '../crypto/keyStorage.js';
+import { utf8ToBytes, bytesToBase64, base64ToBytes } from '../crypto/utils.js';
+
+async function encryptData(data) {
+  const key = getActiveVaultKey();
+  if (!key) return data;
+  try {
+    const iv = new Uint8Array(12);
+    crypto.getRandomValues(iv);
+    const ctBuf = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      utf8ToBytes(JSON.stringify(data))
+    );
+    return {
+      __enc: true,
+      iv: bytesToBase64(iv),
+      ct: bytesToBase64(new Uint8Array(ctBuf))
+    };
+  } catch (err) {
+    console.warn("Encryption fallback:", err);
+    return data;
+  }
+}
+
+async function decryptData(stored) {
+  if (!stored || typeof stored !== 'object' || !stored.__enc || !stored.iv || !stored.ct) {
+    return stored;
+  }
+  const key = getActiveVaultKey();
+  if (!key) return stored;
+  try {
+    const ptBuf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBytes(stored.iv) },
+      key,
+      base64ToBytes(stored.ct)
+    );
+    return JSON.parse(new TextDecoder().decode(ptBuf));
+  } catch (e) {
+    console.error("Decryption failed for stored entity:", e);
+    return stored;
+  }
+}
+
+async function packMessageForStorage(msg) {
+  const key = getActiveVaultKey();
+  if (!key) return msg;
+  const sensitive = {
+    text: msg.text,
+    attachment: msg.attachment,
+    replyTo: msg.replyTo,
+    reactions: msg.reactions
+  };
+  const enc = await encryptData(sensitive);
+  return {
+    ...msg,
+    text: "[ENCRYPTED_AT_REST]",
+    attachment: null,
+    replyTo: null,
+    reactions: null,
+    __enc: true,
+    encPayload: enc
+  };
+}
+
+async function unpackMessageFromStorage(storedMsg) {
+  if (!storedMsg || !storedMsg.__enc || !storedMsg.encPayload) {
+    return storedMsg;
+  }
+  const decrypted = await decryptData(storedMsg.encPayload);
+  if (decrypted && typeof decrypted === 'object') {
+    return {
+      ...storedMsg,
+      text: decrypted.text,
+      attachment: decrypted.attachment,
+      replyTo: decrypted.replyTo,
+      reactions: decrypted.reactions
+    };
+  }
+  return storedMsg;
+}
+
 export function getDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open("veil_data", 3);
@@ -98,10 +180,11 @@ export async function saveContact(contact) {
 }
 
 export async function saveLocalPreKeys(prekeys) {
+  const toStore = await encryptData(prekeys);
   const db = await getDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction("prekeys", "readwrite");
-    tx.objectStore("prekeys").put(prekeys, "private_material");
+    tx.objectStore("prekeys").put(toStore, "private_material");
     tx.oncomplete = () => resolve();
     tx.onerror = (e) => reject(e.target.error);
   });
@@ -112,7 +195,11 @@ export async function getLocalPreKeys() {
   return new Promise((resolve, reject) => {
     const tx = db.transaction("prekeys", "readonly");
     const req = tx.objectStore("prekeys").get("private_material");
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = async () => {
+      if (!req.result) return resolve(null);
+      const decrypted = await decryptData(req.result);
+      resolve(decrypted);
+    };
     req.onerror = (e) => reject(e.target.error);
   });
 }
@@ -127,11 +214,13 @@ export async function saveMessage(msg) {
     return Promise.resolve();
   }
 
+  const packed = await packMessageForStorage(msg);
   const db = await getDB();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const tx = db.transaction("messages", "readwrite");
-    tx.objectStore("messages").add(msg);
+    tx.objectStore("messages").add(packed);
     tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
   });
 }
 
@@ -141,11 +230,12 @@ export async function getMessages(contactId) {
     const tx = db.transaction("messages", "readonly");
     const index = tx.objectStore("messages").index("contactId");
     const req = index.getAll(IDBKeyRange.only(contactId));
-    req.onsuccess = () => {
-      const diskMsgs = req.result;
+    req.onsuccess = async () => {
+      const diskMsgs = req.result || [];
+      const unpackedDiskMsgs = await Promise.all(diskMsgs.map(m => unpackMessageFromStorage(m)));
       const ramMsgs = volatileMemory.get(contactId) || [];
       // Merge and sort by timestamp
-      const allMsgs = [...diskMsgs, ...ramMsgs].sort((a, b) => a.ts - b.ts);
+      const allMsgs = [...unpackedDiskMsgs, ...ramMsgs].sort((a, b) => a.ts - b.ts);
       resolve(allMsgs);
     };
   });
@@ -203,12 +293,14 @@ export async function updateMessageReactions(contactId, seq, reactions) {
     const index = store.index("contactId");
     const req = index.openCursor(IDBKeyRange.only(contactId));
     
-    req.onsuccess = (e) => {
+    req.onsuccess = async (e) => {
       const cursor = e.target.result;
       if (cursor) {
         if (cursor.value.seq === seq) {
-          const updatedMsg = { ...cursor.value, reactions };
-          cursor.update(updatedMsg);
+          const unpacked = await unpackMessageFromStorage(cursor.value);
+          unpacked.reactions = reactions;
+          const repacked = await packMessageForStorage(unpacked);
+          cursor.update(repacked);
           resolve();
           return;
         }

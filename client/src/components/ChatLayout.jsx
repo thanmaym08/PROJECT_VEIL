@@ -1,16 +1,19 @@
 import { useState, useEffect, useRef } from 'react';
 import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Zap, Radio } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import CreateGroupModal from './CreateGroupModal';
 import GroupInfoModal from './GroupInfoModal';
 import JoinGroupModal from './JoinGroupModal';
 import EmojiGifPicker from './EmojiGifPicker';
+import VoiceMemoPlayer from './VoiceMemoPlayer';
+import PanicModal from './PanicModal';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
-import { base64ToBytes } from '../crypto/utils';
+import { base64ToBytes, bytesToBase64, utf8ToBytes } from '../crypto/utils';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { encryptAttachment, uploadEncryptedAttachment, downloadEncryptedAttachment, decryptAttachment, revokeAttachmentUrl } from '../crypto/mediaCipher';
 import { Capacitor } from '@capacitor/core';
 
@@ -108,7 +111,14 @@ function SwipeableMessageRow({ children, onReply, disabled }) {
   );
 }
 
-export default function ChatLayout({ keys, myId }) {
+export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
+  const [appMode, setAppMode] = useState(() => localStorage.getItem('veil_app_mode') || 'flow');
+  const toggleAppMode = (mode) => {
+    const next = mode || (appMode === 'flow' ? 'bunker' : 'flow');
+    setAppMode(next);
+    localStorage.setItem('veil_app_mode', next);
+  };
+
   const [contacts, setContacts] = useState([]);
   const [activeContact, setActiveContact] = useState(null);
   const [groups, setGroups] = useState([]);
@@ -122,6 +132,18 @@ export default function ChatLayout({ keys, myId }) {
   const [incomingInvite, setIncomingInvite] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
   const toastTimeoutRef = useRef(null);
+
+  const [sidebarFilter, setSidebarFilter] = useState('');
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showPanicModal, setShowPanicModal] = useState(false);
+
+  // Audio / Voice Note recording state
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
 
   const showToast = (msg) => {
     setToastMessage(msg);
@@ -139,6 +161,118 @@ export default function ChatLayout({ keys, myId }) {
   const [lightboxImage, setLightboxImage] = useState(null);
   const fileInputRef = useRef(null);
   const inputRef = useRef(null);
+
+  const handleSendVoiceNote = async (audioBlob) => {
+    if (!activeContact && !activeGroup) return;
+    setUploadingAttachment(true);
+    try {
+      const fileName = `voice_note_${Date.now()}.webm`;
+      const file = new File([audioBlob], fileName, { type: audioBlob.type || 'audio/webm' });
+      const encrypted = await encryptAttachment(file);
+      const apiBase = getApiBaseUrl();
+      const attachmentId = await uploadEncryptedAttachment(apiBase, encrypted.ciphertextBuffer);
+      const audioUrl = URL.createObjectURL(audioBlob);
+
+      const attachmentMetadata = {
+        id: attachmentId,
+        key: encrypted.keyB64,
+        iv: encrypted.ivB64,
+        fileName: encrypted.fileName,
+        fileSize: encrypted.fileSize,
+        mimeType: encrypted.mimeType,
+        isVoiceMemo: true
+      };
+
+      setDecryptedMedia(prev => ({
+        ...prev,
+        [attachmentId]: {
+          loading: false,
+          objectUrl: audioUrl,
+          fileName: encrypted.fileName,
+          fileSize: encrypted.fileSize,
+          mimeType: encrypted.mimeType,
+          isVoiceMemo: true
+        }
+      }));
+
+      await sendEncryptedPayload('', attachmentMetadata);
+      showToast("Voice memo encrypted & transmitted!");
+    } catch (err) {
+      console.error("[VEIL] Failed to send voice memo:", err);
+      showToast("Voice memo transmission failed");
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+
+  const startAudioRecording = async () => {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        showToast("Audio recording not supported in this browser");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mimeType = (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm'))
+        ? 'audio/webm' 
+        : ((typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/mp4')) ? 'audio/mp4' : '');
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      recorder.start(100);
+      mediaRecorderRef.current = recorder;
+      setIsRecordingAudio(true);
+      setAudioDuration(0);
+
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = setInterval(() => {
+        setAudioDuration(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error("[AUDIO] Microphone access denied or error:", err);
+      showToast("Microphone permission denied");
+    }
+  };
+
+  const cancelAudioRecording = () => {
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    audioChunksRef.current = [];
+    setIsRecordingAudio(false);
+    setAudioDuration(0);
+  };
+
+  const finishAndSendAudioRecording = () => {
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    if (!mediaRecorderRef.current) return;
+
+    const recorder = mediaRecorderRef.current;
+    recorder.onstop = () => {
+      const mime = recorder.mimeType || 'audio/webm';
+      const blob = new Blob(audioChunksRef.current, { type: mime });
+      audioChunksRef.current = [];
+      setIsRecordingAudio(false);
+      setAudioDuration(0);
+      if (blob.size > 0) {
+        handleSendVoiceNote(blob);
+      }
+    };
+
+    if (recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+  };
 
   // Emoji Reaction State
   const [activeReactionSeq, setActiveReactionSeq] = useState(null);
@@ -821,6 +955,10 @@ export default function ChatLayout({ keys, myId }) {
       }
 
       if (socket.readyState === WebSocket.OPEN) {
+        const timestamp = Date.now();
+        const popMessage = utf8ToBytes(`VEIL-REGISTER:${myId}:${timestamp}`);
+        const registrationSig = bytesToBase64(ed25519.sign(popMessage, base64ToBytes(keys.ed25519.secretKeyB64)));
+
         socket.send(JSON.stringify({
           type: 'register',
           cipherId: myId,
@@ -829,7 +967,9 @@ export default function ChatLayout({ keys, myId }) {
           ed25519Pub: keys.ed25519.publicKeyB64,
           deliveryToken: keys.profile.deliveryTokenB64,
           fcmToken,
-          bundle
+          bundle,
+          registrationSig,
+          timestamp
         }));
       }
     };
@@ -1468,13 +1608,114 @@ export default function ChatLayout({ keys, myId }) {
     }
   };
 
+  const isFlow = appMode === 'flow';
+
+  const filteredGroups = groups.filter(g => 
+    !sidebarFilter.trim() || g.name.toLowerCase().includes(sidebarFilter.toLowerCase().trim())
+  );
+  const filteredContacts = contacts.filter(c => 
+    !sidebarFilter.trim() || 
+    c.name.toLowerCase().includes(sidebarFilter.toLowerCase().trim()) || 
+    c.id.toLowerCase().includes(sidebarFilter.toLowerCase().trim())
+  );
+
   return (
-    <div className="flex-1 flex overflow-hidden p-2 md:p-4 gap-4">
+    <div className={`flex-1 flex overflow-hidden p-2 md:p-4 gap-4 ${isFlow ? 'bg-[#111b21]' : ''}`}>
       {/* Sidebar */}
-      <div className={`w-full md:w-80 bg-stark-surface border border-arc-cyan/20 flex-col shadow-glow-cyan ${(activeContact || activeGroup) ? 'hidden md:flex' : 'flex'}`} style={{clipPath: "polygon(0 0, 100% 0, 100% 100%, 5% 100%, 0 95%)"}}>
-        <div className="p-4 border-b border-arc-cyan/20 flex justify-between items-center bg-arc-cyan/5">
-          <div>
-            <h2 className="font-hud font-bold tracking-[0.2em] text-arc-cyan text-lg md:text-xl">PROJECT VEIL // QUANTUM RELAY</h2>
+      <div 
+        className={`w-full md:w-80 flex-col transition-all duration-200 ${(activeContact || activeGroup) ? 'hidden md:flex' : 'flex'} ${
+          isFlow 
+            ? 'bg-[#111b21] border border-[#222e35] rounded-xl shadow-lg' 
+            : 'bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan'
+        }`} 
+        style={!isFlow ? { clipPath: "polygon(0 0, 100% 0, 100% 100%, 5% 100%, 0 95%)" } : {}}
+      >
+        {/* App Header & Dual Mode Switcher */}
+        <div className={`p-3 border-b flex flex-col gap-2.5 ${isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-arc-cyan/5 border-arc-cyan/20'}`}>
+          <div className="flex justify-between items-center">
+            {/* Mode Switcher Segmented Control */}
+            <div className={`flex items-center p-0.5 rounded-lg border ${
+              isFlow ? 'bg-[#111b21] border-[#2a3942]' : 'bg-black/60 border-arc-cyan/30'
+            }`}>
+              <button
+                type="button"
+                onClick={() => toggleAppMode('flow')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-all ${
+                  isFlow
+                    ? 'bg-[#00a884] text-white shadow'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+                title="Veil Flow: WhatsApp-Style Secure Messenger"
+              >
+                <MessageSquare size={13} />
+                <span>Veil Flow</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleAppMode('bunker')}
+                className={`px-2.5 py-1 rounded-md text-xs font-hud font-bold tracking-wider flex items-center gap-1.5 transition-all ${
+                  !isFlow
+                    ? 'bg-arc-cyan/20 text-arc-cyan border border-arc-cyan shadow-glow-cyan'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+                title="Veil Bunker: Zero-Trust Cyberpunk Quantum Fortress"
+              >
+                <ShieldCheck size={13} />
+                <span>Bunker</span>
+              </button>
+            </div>
+
+            {/* Quick Actions (Panic Wipe + Lock) */}
+            <div className="flex items-center gap-1.5">
+              {!isFlow && (
+                <button
+                  type="button"
+                  onClick={() => setShowPanicModal(true)}
+                  className="px-2 py-1 bg-stark-crimson/20 hover:bg-stark-crimson/40 border border-stark-crimson text-stark-crimson hover:text-white rounded text-[10px] font-hud font-bold tracking-wider flex items-center gap-1 transition-all shadow-[0_0_8px_rgba(255,42,95,0.3)]"
+                  title="Zero-Forensic Emergency Kill-Switch"
+                >
+                  <Flame size={12} className="animate-pulse" />
+                  <span className="hidden sm:inline">PANIC</span>
+                </button>
+              )}
+              {onLock && (
+                <button
+                  type="button"
+                  onClick={onLock}
+                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                  title="Lock Vault"
+                >
+                  <Lock size={15} />
+                </button>
+              )}
+              <button 
+                onClick={() => setShowCreateGroup(true)} 
+                className={`p-1.5 rounded transition-colors flex items-center gap-0.5 ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="Create Group"
+              >
+                <Users size={16} />
+                <Plus size={10} className="-ml-1" />
+              </button>
+              <button 
+                onClick={() => setShowAddContact(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-transparent hover:border-arc-cyan/30'
+                }`}
+                title="Add Contact / QR Scanner"
+              >
+                <UserPlus size={17} />
+              </button>
+            </div>
+          </div>
+
+          {/* Subtitle & Status */}
+          <div className="flex justify-between items-center text-[10px] font-mono">
             <div 
               onClick={() => {
                 const current = localStorage.getItem('veil_relay_url') || getWsUrl();
@@ -1486,90 +1727,106 @@ export default function ChatLayout({ keys, myId }) {
                 }
               }}
               title="Click to view/change Relay Server URL"
-              className="text-xs text-arc-cyan/70 font-mono flex items-center gap-2 mt-1 cursor-pointer hover:underline"
+              className={`flex items-center gap-1.5 cursor-pointer hover:underline ${
+                isFlow ? 'text-gray-400' : 'text-arc-cyan/70'
+              }`}
             >
-              <div className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'connected' ? 'bg-arc-cyan animate-pulse shadow-glow-cyan' : 'bg-stark-crimson shadow-glow-crimson'}`} />
-              STATUS: {wsStatus === 'connected' ? 'ENCRYPTED (ML-KEM-768)' : 'OFFLINE (TAP TO CONFIGURE)'}
+              <div className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'connected' ? (isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan shadow-glow-cyan animate-pulse') : 'bg-stark-crimson'}`} />
+              <span>{wsStatus === 'connected' ? (isFlow ? 'E2EE Relay Active' : 'ML-KEM-768 ENCRYPTED') : 'Offline (Configure)'}</span>
             </div>
-            <div className="text-[10px] text-arc-cyan/50 font-mono mt-1 border border-arc-cyan/20 px-1 inline-block">ID: {myId.slice(0, 12)}...</div>
+            <span className={isFlow ? 'text-gray-500' : 'text-arc-cyan/50'}>ID: {myId.slice(0, 8)}...</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <button 
-              onClick={() => setShowCreateGroup(true)} 
-              className="p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30 hover:border-arc-cyan rounded transition-colors flex items-center gap-1"
-              title="Create New Encrypted Group"
-            >
-              <Users size={18} />
-              <Plus size={12} className="-ml-1 text-arc-cyan" />
-            </button>
-            <button 
-              onClick={() => setShowAddContact(true)} 
-              className="p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent hover:border-arc-cyan/30 rounded transition-colors"
-              title="Add Friend by Cipher ID"
-            >
-              <UserPlus size={20} />
-            </button>
+
+          {/* Contact Search Bar (WhatsApp style) */}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all ${
+            isFlow 
+              ? 'bg-[#111b21] border-[#222e35] text-white focus-within:border-[#00a884]' 
+              : 'bg-black/50 border-arc-cyan/20 text-arc-cyan focus-within:border-arc-cyan'
+          }`}>
+            <Search size={14} className={isFlow ? 'text-gray-400' : 'text-arc-cyan/60'} />
+            <input
+              type="text"
+              value={sidebarFilter}
+              onChange={(e) => setSidebarFilter(e.target.value)}
+              placeholder={isFlow ? "Search or start new chat" : "FILTER CHANNELS..."}
+              className={`w-full bg-transparent text-xs outline-none ${
+                isFlow ? 'text-white placeholder:text-gray-500' : 'font-mono text-arc-cyan placeholder:text-arc-cyan/40'
+              }`}
+            />
+            {sidebarFilter && (
+              <button type="button" onClick={() => setSidebarFilter('')} className="text-gray-400 hover:text-white">
+                <X size={13} />
+              </button>
+            )}
           </div>
         </div>
         
         {/* Navigation Tabs: ALL / DIRECT / GROUPS */}
-        <div className="flex border-b border-arc-cyan/20 bg-black/40 text-[10px] font-hud tracking-wider">
+        <div className={`flex border-b text-[10px] font-medium tracking-wide ${
+          isFlow ? 'bg-[#111b21] border-[#222e35]' : 'border-arc-cyan/20 bg-black/40 font-hud tracking-wider'
+        }`}>
           <button
             onClick={() => setActiveTab('all')}
             className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
               activeTab === 'all'
-                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            ALL ({contacts.length + groups.length})
+            ALL ({filteredContacts.length + filteredGroups.length})
           </button>
           <button
             onClick={() => setActiveTab('direct')}
             className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
               activeTab === 'direct'
-                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            DIRECT ({contacts.length})
+            CHATS ({filteredContacts.length})
           </button>
           <button
             onClick={() => setActiveTab('groups')}
             className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
               activeTab === 'groups'
-                ? 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]'
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            GROUPS ({groups.length})
+            GROUPS ({filteredGroups.length})
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {contacts.length === 0 && groups.length === 0 ? (
+          {filteredContacts.length === 0 && filteredGroups.length === 0 ? (
             <div className="p-6 text-center flex flex-col items-center justify-center h-full opacity-50">
-              <UserPlus size={32} className="text-arc-cyan mb-3" />
-              <div className="font-hud tracking-widest text-[10px] text-arc-cyan">NO CHANNELS FOUND</div>
-              <div className="font-mono text-[9px] text-arc-cyan mt-2">Add a friend or create a group to start</div>
+              <UserPlus size={32} className={isFlow ? 'text-[#00a884] mb-3' : 'text-arc-cyan mb-3'} />
+              <div className={`text-xs ${isFlow ? 'text-gray-300 font-sans' : 'font-hud tracking-widest text-arc-cyan'}`}>
+                {sidebarFilter ? 'NO RESULTS MATCHING SEARCH' : 'NO CHANNELS FOUND'}
+              </div>
+              <div className={`text-[10px] mt-1 ${isFlow ? 'text-gray-500' : 'font-mono text-arc-cyan/60'}`}>
+                Add a contact or start an encrypted group
+              </div>
             </div>
           ) : (
             <>
               {/* Groups List (if in 'all' or 'groups' tab) */}
-              {(activeTab === 'all' || activeTab === 'groups') && groups.length > 0 && (
+              {(activeTab === 'all' || activeTab === 'groups') && filteredGroups.length > 0 && (
                 <>
                   {activeTab === 'all' && (
-                    <div className="px-4 py-1.5 bg-arc-cyan/5 border-b border-arc-cyan/10 text-[9px] font-hud tracking-widest text-arc-cyan/70 uppercase flex items-center justify-between">
-                      <span>GROUPS ({groups.length})</span>
+                    <div className={`px-4 py-1.5 border-b text-[9px] uppercase flex items-center justify-between ${
+                      isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                    }`}>
+                      <span>GROUPS ({filteredGroups.length})</span>
                       <button 
                         onClick={() => setShowCreateGroup(true)}
-                        className="text-[9px] text-arc-cyan hover:underline flex items-center gap-0.5"
+                        className={`text-[9px] hover:underline flex items-center gap-0.5 ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
                       >
                         <Plus size={10} /> NEW
                       </button>
                     </div>
                   )}
-                  {groups.map(g => {
+                  {filteredGroups.map(g => {
                     const isSelected = activeGroup?.id === g.id;
                     return (
                       <button
@@ -1578,20 +1835,32 @@ export default function ChatLayout({ keys, myId }) {
                           setActiveContact(null);
                           setActiveGroup(g);
                         }}
-                        className={`w-full p-3.5 text-left border-b border-arc-cyan/10 hover:bg-arc-cyan/5 flex items-center justify-between transition-all ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`}
+                        className={`w-full p-3 text-left border-b transition-all flex items-center justify-between ${
+                          isFlow
+                            ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
+                            : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
+                        }`}
                       >
                         <div className="flex items-center gap-3 truncate">
-                          <div className="w-8 h-8 rounded bg-arc-cyan/10 border border-arc-cyan/40 flex items-center justify-center text-arc-cyan shrink-0">
-                            <Users size={16} />
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                            isFlow 
+                              ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
+                              : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan'
+                          }`}>
+                            <Users size={18} />
                           </div>
                           <div className="truncate">
-                            <div className="font-hud tracking-wider font-bold text-white text-sm truncate">{g.name}</div>
-                            <div className="text-[10px] text-arc-cyan/60 font-mono truncate">
-                              {g.members?.length || 1} members // ENCRYPTED
+                            <div className={`font-bold text-sm truncate ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>{g.name}</div>
+                            <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/60 font-mono'}`}>
+                              {g.members?.length || 1} participants • E2EE
                             </div>
                           </div>
                         </div>
-                        <div className="text-[8px] font-mono text-arc-cyan border border-arc-cyan/30 px-1.5 py-0.5 rounded uppercase shrink-0">
+                        <div className={`text-[8px] px-1.5 py-0.5 rounded uppercase shrink-0 ${
+                          isFlow 
+                            ? 'bg-[#00a884]/10 text-[#00a884] border border-[#00a884]/30' 
+                            : 'font-mono text-arc-cyan border border-arc-cyan/30'
+                        }`}>
                           GROUP
                         </div>
                       </button>
@@ -1603,13 +1872,16 @@ export default function ChatLayout({ keys, myId }) {
               {/* Direct Contacts List (if in 'all' or 'direct' tab) */}
               {(activeTab === 'all' || activeTab === 'direct') && (
                 <>
-                  {activeTab === 'all' && groups.length > 0 && contacts.length > 0 && (
-                    <div className="px-4 py-1.5 bg-arc-cyan/5 border-b border-arc-cyan/10 text-[9px] font-hud tracking-widest text-arc-cyan/70 uppercase">
-                      DIRECT CONTACTS ({contacts.length})
+                  {activeTab === 'all' && filteredGroups.length > 0 && filteredContacts.length > 0 && (
+                    <div className={`px-4 py-1.5 border-b text-[9px] uppercase ${
+                      isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                    }`}>
+                      DIRECT CHATS ({filteredContacts.length})
                     </div>
                   )}
-                  {contacts.map(c => {
+                  {filteredContacts.map(c => {
                     const isSelected = activeContact?.id === c.id;
+                    const initials = (c.name || 'AG').slice(0, 2).toUpperCase();
                     return (
                       <button 
                         key={c.id} 
@@ -1617,21 +1889,36 @@ export default function ChatLayout({ keys, myId }) {
                           setActiveGroup(null);
                           setActiveContact(c);
                         }}
-                        className={`w-full p-3.5 text-left border-b border-arc-cyan/10 hover:bg-arc-cyan/5 flex items-center justify-between transition-all ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`}
+                        className={`w-full p-3 text-left border-b transition-all flex items-center justify-between ${
+                          isFlow
+                            ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
+                            : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
+                        }`}
                       >
-                        <div>
-                          <div className="font-hud tracking-widest font-bold text-white text-sm">{c.name}</div>
-                          <div className="text-[10px] text-arc-cyan/50 font-mono mt-0.5">{c.id.slice(0, 9)}...</div>
+                        <div className="flex items-center gap-3 truncate">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 font-bold ${
+                            isFlow 
+                              ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
+                              : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan font-mono text-xs'
+                          }`}>
+                            {initials}
+                          </div>
+                          <div className="truncate">
+                            <div className={`text-sm truncate font-medium ${isFlow ? 'text-white font-sans' : 'font-hud tracking-widest font-bold text-white'}`}>{c.name}</div>
+                            <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/50 font-mono mt-0.5'}`}>
+                              {c.id.slice(0, 10)}...
+                            </div>
+                          </div>
                         </div>
                         {c.verified ? (
-                          <div className="flex flex-col items-end">
-                            <ShieldCheck size={14} className="text-arc-cyan" />
-                            <span className="text-[8px] font-mono text-arc-cyan mt-1">PQ-OK</span>
+                          <div className="flex flex-col items-end shrink-0">
+                            <ShieldCheck size={15} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
+                            <span className={`text-[8px] mt-0.5 ${isFlow ? 'text-[#00a884]' : 'font-mono text-arc-cyan'}`}>VERIFIED</span>
                           </div>
                         ) : (
-                          <div className="flex flex-col items-end">
+                          <div className="flex flex-col items-end shrink-0">
                             <ShieldAlert size={14} className="text-stark-gold" />
-                            <span className="text-[8px] font-mono text-stark-gold mt-1 animate-pulse">UNVERIFIED</span>
+                            <span className="text-[8px] font-mono text-stark-gold mt-0.5 animate-pulse">UNVERIFIED</span>
                           </div>
                         )}
                       </button>
@@ -1646,29 +1933,54 @@ export default function ChatLayout({ keys, myId }) {
 
       {/* Chat Area */}
       {(activeContact || activeGroup) ? (
-        <div className="flex-1 flex flex-col bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan overflow-hidden" style={{clipPath: "polygon(0 5%, 5% 0, 100% 0, 100% 100%, 0 100%)"}}>
+        <div 
+          className={`flex-1 flex flex-col overflow-hidden transition-all duration-200 ${
+            isFlow ? 'bg-[#0b141a] border border-[#222e35] rounded-xl' : 'bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan'
+          }`} 
+          style={!isFlow ? { clipPath: "polygon(0 5%, 5% 0, 100% 0, 100% 100%, 0 100%)" } : {}}
+        >
           {/* Header */}
-          <div className="p-2 md:p-4 border-b border-arc-cyan/20 flex justify-between items-center bg-stark-bg/80 backdrop-blur-md">
+          <div className={`p-2.5 md:p-3.5 border-b flex justify-between items-center transition-colors ${
+            isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-stark-bg/80 border-arc-cyan/20 backdrop-blur-md'
+          }`}>
             {activeGroup ? (
               <>
-                <div className="flex items-center gap-2 md:gap-3">
-                  <button onClick={() => setActiveGroup(null)} className="md:hidden p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent rounded transition-colors">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <div className="flex items-center gap-2.5 md:gap-3">
+                  <button onClick={() => setActiveGroup(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                   </button>
-                  <div className="w-9 h-9 rounded bg-arc-cyan/15 border border-arc-cyan/40 flex items-center justify-center text-arc-cyan shrink-0">
-                    <Users size={20} />
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    isFlow 
+                      ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
+                      : 'rounded bg-arc-cyan/15 border border-arc-cyan/40 text-arc-cyan'
+                  }`}>
+                    <Users size={18} />
                   </div>
                   <div>
-                    <div className="font-hud tracking-widest font-bold text-base md:text-lg text-white flex items-center gap-2">
+                    <div className={`font-bold text-base md:text-lg flex items-center gap-2 ${
+                      isFlow ? 'text-white font-sans' : 'font-hud tracking-widest text-white'
+                    }`}>
                       <span>{activeGroup.name}</span>
-                      <span className="text-[9px] font-mono text-arc-cyan border border-arc-cyan/30 px-1.5 py-0.2 rounded uppercase">E2EE GROUP</span>
+                      <span className={`text-[9px] px-1.5 py-0.2 rounded uppercase ${
+                        isFlow ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/30' : 'font-mono text-arc-cyan border border-arc-cyan/30'
+                      }`}>E2EE GROUP</span>
                     </div>
-                    <div className="text-[10px] text-arc-cyan/70 font-mono mt-0.5">
-                      {activeGroup.members?.length || 1} PARTICIPANTS • ZERO-KNOWLEDGE MULTI-PARTY
+                    <div className={`text-[11px] mt-0.5 ${
+                      isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/70 font-mono'
+                    }`}>
+                      {activeGroup.members?.length || 1} PARTICIPANTS • ZERO-KNOWLEDGE
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowSearch(!showSearch)}
+                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                    title="Search in conversation"
+                  >
+                    <Search size={17} />
+                  </button>
                   <button
                     onClick={() => {
                       const invitePayload = btoa(unescape(encodeURIComponent(JSON.stringify({
@@ -1684,15 +1996,23 @@ export default function ChatLayout({ keys, myId }) {
                         prompt("Group Invite Link:", inviteUrl);
                       });
                     }}
-                    className="px-2.5 py-1 md:px-3 md:py-2 border border-arc-cyan/40 bg-arc-cyan/10 text-arc-cyan hover:bg-arc-cyan/20 text-[10px] md:text-xs font-hud tracking-wider flex items-center gap-1.5 transition-all shadow-glow-cyan"
+                    className={`px-2.5 py-1 md:px-3 md:py-1.5 border text-[10px] md:text-xs flex items-center gap-1.5 transition-all ${
+                      isFlow 
+                        ? 'border-[#00a884]/40 bg-[#00a884]/10 text-[#00a884] hover:bg-[#00a884]/20 rounded-md font-sans' 
+                        : 'border-arc-cyan/40 bg-arc-cyan/10 text-arc-cyan hover:bg-arc-cyan/20 font-hud tracking-wider shadow-glow-cyan'
+                    }`}
                     title="Copy Shareable Invite Link"
                   >
                     <Share2 size={13} />
-                    <span className="hidden md:inline">INVITE LINK</span>
+                    <span className="hidden md:inline">INVITE</span>
                   </button>
                   <button
                     onClick={() => setShowGroupInfo(true)}
-                    className="px-2.5 py-1 md:px-3 md:py-2 border border-arc-cyan/40 bg-stark-bg text-arc-cyan hover:border-arc-cyan text-[10px] md:text-xs font-hud tracking-wider flex items-center gap-1.5 transition-all"
+                    className={`px-2.5 py-1 md:px-3 md:py-1.5 border text-[10px] md:text-xs flex items-center gap-1.5 transition-all ${
+                      isFlow 
+                        ? 'border-gray-600 bg-transparent text-gray-300 hover:text-white rounded-md font-sans' 
+                        : 'border-arc-cyan/40 bg-stark-bg text-arc-cyan hover:border-arc-cyan font-hud tracking-wider'
+                    }`}
                     title="View Group Info & Members"
                   >
                     <Info size={13} />
@@ -1702,24 +2022,46 @@ export default function ChatLayout({ keys, myId }) {
               </>
             ) : (
               <>
-                <div className="flex items-center gap-2 md:gap-3">
-                  <button onClick={() => setActiveContact(null)} className="md:hidden p-2 text-arc-cyan hover:bg-arc-cyan/20 border border-transparent rounded transition-colors">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <div className="flex items-center gap-2.5 md:gap-3">
+                  <button onClick={() => setActiveContact(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                   </button>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
+                    isFlow 
+                      ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
+                      : 'rounded bg-arc-cyan/15 border border-arc-cyan/40 text-arc-cyan font-mono'
+                  }`}>
+                    {(activeContact.name || 'AG').slice(0, 2).toUpperCase()}
+                  </div>
                   <div>
-                    <div className="font-hud tracking-widest font-bold text-base md:text-lg text-white">{activeContact.name}</div>
-                    <div className="hidden md:inline-block text-[10px] text-arc-cyan/70 font-mono mt-1 border border-arc-cyan/20 px-1">TARGET: {activeContact.id}</div>
-                    <div className="hidden md:inline-block text-[10px] text-arc-cyan/50 font-mono ml-2">[HYBRID: ML-KEM + X25519]</div>
+                    <div className={`font-bold text-base md:text-lg text-white ${
+                      isFlow ? 'font-sans' : 'font-hud tracking-widest'
+                    }`}>{activeContact.name}</div>
+                    <div className={`text-[11px] ${
+                      isFlow ? 'text-[#00a884]' : 'text-[10px] text-arc-cyan/70 font-mono'
+                    }`}>
+                      {typingUsers[activeContact.id] 
+                        ? 'typing...' 
+                        : (isFlow ? 'Online • End-to-End Encrypted' : `TARGET: ${activeContact.id.slice(0, 8)}... [ML-KEM + X25519]`)}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSearch(!showSearch)}
+                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                    title="Search in conversation"
+                  >
+                    <Search size={17} />
+                  </button>
                   <div className="relative">
                     <button 
                       onClick={() => setShowVanishMenu(!showVanishMenu)}
-                      className={`px-2 py-1 md:px-3 md:py-2 border text-[9px] md:text-[10px] font-mono tracking-widest transition-all ${
+                      className={`px-2 py-1 md:px-3 md:py-1.5 border text-[9px] md:text-[10px] transition-all rounded ${
                         (vanishModes[activeContact.id] || 0) > 0 
-                          ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold' 
-                          : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan'
+                          ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold font-bold' 
+                          : (isFlow ? 'bg-[#111b21] border-[#2a3942] text-gray-300 hover:border-gray-400 font-sans' : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan font-mono tracking-widest')
                       }`}
                     >
                       {(vanishModes[activeContact.id] || 0) === 0 ? 'VANISH: OFF' : 
@@ -1727,7 +2069,9 @@ export default function ChatLayout({ keys, myId }) {
                        (vanishModes[activeContact.id] === 60000) ? 'VANISH: 1m' : 'VANISH: 1h'}
                     </button>
                     {showVanishMenu && (
-                      <div className="absolute top-full right-0 mt-1 w-32 bg-stark-bg border border-arc-cyan shadow-glow-cyan z-50 flex flex-col">
+                      <div className={`absolute top-full right-0 mt-1 w-32 border z-50 flex flex-col shadow-xl rounded ${
+                        isFlow ? 'bg-[#202c33] border-[#2a3942]' : 'bg-stark-bg border-arc-cyan shadow-glow-cyan'
+                      }`}>
                         {[
                           { label: 'OFF', value: 0 },
                           { label: '5 SECONDS', value: 5000 },
@@ -1744,10 +2088,10 @@ export default function ChatLayout({ keys, myId }) {
                               }
                               setShowVanishMenu(false);
                             }}
-                            className={`text-left px-3 py-2 text-[10px] font-mono tracking-wider transition-colors ${
+                            className={`text-left px-3 py-2 text-[10px] tracking-wider transition-colors ${
                               (vanishModes[activeContact.id] || 0) === opt.value 
-                                ? 'bg-arc-cyan text-stark-bg font-bold' 
-                                : 'text-arc-cyan hover:bg-arc-cyan/20'
+                                ? (isFlow ? 'bg-[#00a884] text-white font-bold' : 'bg-arc-cyan text-stark-bg font-bold font-mono')
+                                : (isFlow ? 'text-gray-300 hover:bg-[#2a3942]' : 'text-arc-cyan hover:bg-arc-cyan/20 font-mono')
                             }`}
                           >
                             {opt.label}
@@ -1756,28 +2100,77 @@ export default function ChatLayout({ keys, myId }) {
                       </div>
                     )}
                   </div>
-                  <button onClick={() => setShowSafetyNumber(true)} className={`px-2 py-1 md:px-4 md:py-2 rounded-sm border transition-all text-[10px] md:text-xs font-hud tracking-[0.1em] flex items-center gap-1 md:gap-2 ${activeContact.verified ? 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan' : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'}`}>
+                  <button 
+                    onClick={() => setShowSafetyNumber(true)} 
+                    className={`px-2 py-1 md:px-3 md:py-1.5 rounded border transition-all text-[10px] md:text-xs flex items-center gap-1 md:gap-1.5 ${
+                      activeContact.verified 
+                        ? (isFlow ? 'bg-[#00a884]/15 border-[#00a884] text-[#00a884]' : 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan font-hud tracking-[0.1em]') 
+                        : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'
+                    }`}
+                  >
                     {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-                    <span className="hidden md:inline">{activeContact.verified ? 'LINK SECURED' : 'AUTHENTICATE'}</span>
+                    <span className="hidden md:inline">{activeContact.verified ? 'VERIFIED' : 'AUTHENTICATE'}</span>
                   </button>
                 </div>
               </>
             )}
           </div>
 
+          {/* In-Chat Search Bar */}
+          {showSearch && (
+            <div className={`p-2.5 px-4 flex items-center gap-2 border-b animate-in slide-in-from-top-2 duration-150 ${
+              isFlow ? 'bg-[#202c33] border-[#2a3942]' : 'bg-stark-bg border-arc-cyan/30'
+            }`}>
+              <Search size={15} className={isFlow ? 'text-gray-400' : 'text-arc-cyan'} />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search in conversation..."
+                className={`flex-1 bg-transparent text-xs outline-none ${
+                  isFlow ? 'text-white placeholder-gray-400' : 'text-arc-cyan placeholder-arc-cyan/40 font-mono'
+                }`}
+                autoFocus
+              />
+              {searchQuery && (
+                <span className="text-[10px] font-mono text-gray-400">
+                  {messages.filter(m => (m.text && m.text.toLowerCase().includes(searchQuery.toLowerCase())) || (m.attachment?.fileName && m.attachment.fileName.toLowerCase().includes(searchQuery.toLowerCase()))).length} match(es)
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => { setShowSearch(false); setSearchQuery(''); }}
+                className="p-1 text-gray-400 hover:text-white rounded"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
           {/* Messages */}
           <div 
             className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 flex flex-col gap-4 relative"
             onClick={() => { if (activeReactionSeq) setActiveReactionSeq(null); }}
           >
-            {messages.map(m => (
+            {(searchQuery.trim() 
+              ? messages.filter(m => (m.text && m.text.toLowerCase().includes(searchQuery.toLowerCase())) || (m.attachment?.fileName && m.attachment.fileName.toLowerCase().includes(searchQuery.toLowerCase()))) 
+              : messages
+            ).map(m => (
               <SwipeableMessageRow 
                 key={m.seq} 
                 onReply={() => startReply(m)}
               >
                 <div 
                   id={`msg-${m.seq}`}
-                  className={`group relative max-w-[85%] md:max-w-[80%] p-3 md:p-4 transition-all duration-300 ${m.fromMe ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]' : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg'}`}
+                  className={`group relative max-w-[85%] md:max-w-[75%] p-3 md:p-3.5 transition-all duration-200 ${
+                    isFlow
+                      ? (m.fromMe
+                          ? 'bg-[#005c4b] text-white rounded-2xl rounded-tr-xs shadow-sm ml-auto border border-emerald-600/20'
+                          : 'bg-[#202c33] text-gray-100 rounded-2xl rounded-tl-xs shadow-sm mr-auto border border-slate-700/40')
+                      : (m.fromMe
+                          ? 'bg-gradient-to-r from-arc-cyan/15 to-arc-cyan/5 border border-arc-cyan/30 ml-auto rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[inset_0_0_15px_rgba(0,240,255,0.05)]'
+                          : 'bg-stark-card border-l-2 border-slate-500 mr-auto rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-lg')
+                  }`}
                 >
                   {/* Floating Emoji Picker Popover */}
                   {activeReactionSeq === m.seq && (
@@ -1910,7 +2303,17 @@ export default function ChatLayout({ keys, myId }) {
                         );
                       }
                       if (m.attachment.isGif) {
-                        const gifSrc = m.attachment.gifUrl || m.attachment.previewUrl;
+                        const rawUrl = m.attachment.gifUrl || m.attachment.previewUrl;
+                        const isTrusted = typeof rawUrl === 'string' && /^https:\/\/(media[0-9]?|i)\.giphy\.com\//i.test(rawUrl);
+                        if (!isTrusted) {
+                          return (
+                            <div className="p-2.5 bg-red-950/40 border border-red-500/40 rounded text-xs text-red-400 font-mono flex items-center gap-2">
+                              <span>⚠️</span>
+                              <span>Blocked untrusted media source</span>
+                            </div>
+                          );
+                        }
+                        const gifSrc = rawUrl;
                         return (
                           <div className="relative group overflow-hidden border border-arc-cyan/30 rounded max-w-sm bg-black/40">
                             <img 
@@ -1980,6 +2383,16 @@ export default function ChatLayout({ keys, myId }) {
                           </div>
                         );
                       }
+                      const isAudio = media.mimeType?.startsWith('audio/') || m.attachment.isVoiceMemo;
+                      if (isAudio && media.objectUrl) {
+                        return (
+                          <VoiceMemoPlayer
+                            audioUrl={media.objectUrl}
+                            appMode={appMode}
+                            fileName={media.fileName}
+                          />
+                        );
+                      }
                       // Generic Document / Media Card
                       return (
                         <div className="p-2.5 bg-stark-surface border border-arc-cyan/30 rounded flex items-center justify-between gap-3">
@@ -2004,7 +2417,7 @@ export default function ChatLayout({ keys, myId }) {
                   </div>
                 )}
 
-                {m.text && <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : 'text-gray-200'} break-words`}>{m.text}</div>}
+                {m.text && <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : (isFlow ? 'text-gray-100' : 'text-gray-200')} break-words`}>{m.text}</div>}
 
                 {/* Reaction Pills */}
                 {m.reactions && Object.keys(m.reactions).length > 0 && (
@@ -2035,22 +2448,34 @@ export default function ChatLayout({ keys, myId }) {
                   </div>
                 )}
 
-                <div className="text-[9px] md:text-[10px] font-mono text-arc-cyan/50 mt-2 flex justify-end items-center gap-2">
+                <div className={`text-[9px] md:text-[10px] mt-1.5 flex justify-end items-center gap-1.5 ${
+                  isFlow ? 'text-gray-400 font-sans' : 'font-mono text-arc-cyan/50'
+                }`}>
                   {m.ttl > 0 && m.status === 'read' && m.readAt && (
                     <span className="text-stark-gold font-bold flex items-center gap-1">
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                       {Math.max(0, Math.ceil((m.ttl - (Date.now() - m.readAt)) / 1000))}s
                     </span>
                   )}
-                  <span className="opacity-50 uppercase">{new Date(m.ts).toLocaleTimeString()}</span>
+                  <span className="opacity-70">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                   {m.fromMe && (
                     <div className="flex items-center gap-1 font-hud tracking-widest">
-                      {m.status === 'read' ? (
-                         <><CheckCheck size={12} className="text-[#3b82f6]" /> <span className="text-[#3b82f6]">READ</span></>
-                      ) : m.status === 'delivered' ? (
-                         <><CheckCheck size={12} className="text-arc-cyan" /> <span className="text-arc-cyan">ROUTED</span></>
+                      {isFlow ? (
+                        m.status === 'read' ? (
+                          <CheckCheck size={15} className="text-[#53bdeb]" title="Read" />
+                        ) : m.status === 'delivered' ? (
+                          <CheckCheck size={15} className="text-[#8696a0]" title="Delivered" />
+                        ) : (
+                          <Check size={15} className="text-[#8696a0]" title="Sent" />
+                        )
                       ) : (
-                         <><Check size={12} className="text-arc-cyan/50" /> <span className="text-arc-cyan/50">QUEUED</span></>
+                        m.status === 'read' ? (
+                           <><CheckCheck size={12} className="text-[#3b82f6]" /> <span className="text-[#3b82f6]">READ</span></>
+                        ) : m.status === 'delivered' ? (
+                           <><CheckCheck size={12} className="text-arc-cyan" /> <span className="text-arc-cyan">ROUTED</span></>
+                        ) : (
+                           <><Check size={12} className="text-arc-cyan/50" /> <span className="text-arc-cyan/50">QUEUED</span></>
+                        )
                       )}
                     </div>
                   )}
@@ -2076,7 +2501,9 @@ export default function ChatLayout({ keys, myId }) {
           </div>
 
           {/* Input Dock */}
-          <div className="p-2 md:p-4 bg-stark-bg/80 backdrop-blur-xl border-t border-arc-cyan/20">
+          <div className={`p-2 md:p-3 border-t transition-colors ${
+            isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-stark-bg/80 backdrop-blur-xl border-arc-cyan/20'
+          }`}>
             <input 
               type="file"
               ref={fileInputRef}
@@ -2084,122 +2511,205 @@ export default function ChatLayout({ keys, myId }) {
               className="hidden"
               accept="image/*,video/*,audio/*,application/pdf,text/*"
             />
-            <form onSubmit={handleSend} className="flex flex-col gap-2 relative">
-              {/* Emoji / GIF / Sticker Dock Tray */}
-              {showInputEmojiPicker && (
-                <div className="mb-2">
-                  <EmojiGifPicker 
-                    mode="all"
-                    onSelectEmoji={handleInsertEmoji}
-                    onSelectGif={handleSendGif}
-                    onSelectSticker={handleSendSticker}
-                    onClose={() => setShowInputEmojiPicker(false)}
-                  />
-                </div>
-              )}
-
-              {/* Replying Context Banner */}
-              {replyingTo && (
-                <div className="flex items-center justify-between p-2 bg-stark-card border-l-2 border-arc-cyan border-y border-r border-arc-cyan/30 text-xs font-mono shadow-glow-cyan animate-in fade-in slide-in-from-bottom-2 duration-150">
-                  <div className="flex items-center gap-2 truncate">
-                    <CornerUpLeft size={14} className="text-arc-cyan shrink-0" />
-                    <div className="truncate">
-                      <div className="text-[10px] text-arc-cyan font-bold tracking-wider uppercase">
-                        REPLYING TO {replyingTo.senderName || (replyingTo.fromMe ? 'YOURSELF' : 'CONTACT')}
-                      </div>
-                      <div className="text-gray-300 text-xs truncate max-w-[260px] md:max-w-md">
-                        {replyingTo.hasAttachment ? '📎 [ATTACHMENT] ' : ''}{replyingTo.text || 'Encrypted Media'}
-                      </div>
-                    </div>
+            {isRecordingAudio ? (
+              <div className={`flex items-center justify-between p-2 rounded-full transition-all ${
+                isFlow ? 'bg-[#111b21] border border-[#00a884]/40' : 'bg-stark-surface border border-stark-crimson shadow-[0_0_15px_rgba(255,42,95,0.3)]'
+              }`}>
+                <div className="flex items-center gap-3 pl-3">
+                  <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+                  <span className="font-mono text-xs font-bold text-red-400">
+                    REC {Math.floor(audioDuration / 60)}:{(audioDuration % 60 < 10 ? '0' : '') + (audioDuration % 60)}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {[40, 75, 30, 90, 60, 100, 50, 80, 45, 95].map((h, idx) => (
+                      <span
+                        key={idx}
+                        className={`w-[2.5px] rounded-full animate-pulse ${isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan'}`}
+                        style={{ height: `${h * 0.22}px`, animationDelay: `${idx * 100}ms` }}
+                      />
+                    ))}
                   </div>
+                </div>
+                <div className="flex items-center gap-2 pr-1">
                   <button
                     type="button"
-                    onClick={() => setReplyingTo(null)}
-                    className="text-arc-cyan/60 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-                    title="Cancel Reply"
+                    onClick={cancelAudioRecording}
+                    className="p-2 text-gray-400 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors"
+                    title="Discard voice memo"
                   >
-                    <X size={14} />
+                    <Trash2 size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={finishAndSendAudioRecording}
+                    className={`w-9 h-9 rounded-full flex items-center justify-center text-white transition-all shadow-md ${
+                      isFlow ? 'bg-[#00a884] hover:bg-[#02906f]' : 'bg-arc-cyan text-black hover:bg-white'
+                    }`}
+                    title="Send voice memo"
+                  >
+                    <Send size={15} fill="currentColor" />
                   </button>
                 </div>
-              )}
-
-              {/* Staged Attachment Banner */}
-              {stagedAttachment && (
-                <div className="flex items-center justify-between p-2 bg-arc-cyan/10 border border-arc-cyan/40 text-xs font-mono text-arc-cyan">
-                  <div className="flex items-center gap-2 truncate">
-                    {stagedAttachment.isImage ? <Image size={14} /> : <FileText size={14} />}
-                    <span className="truncate max-w-[200px]">{stagedAttachment.name}</span>
-                    <span className="text-[10px] text-arc-cyan/60">({(stagedAttachment.size / 1024).toFixed(1)} KB)</span>
-                    <span className="text-[9px] bg-arc-cyan/20 text-arc-cyan px-1.5 py-0.5 border border-arc-cyan/40 font-hud tracking-wider uppercase">AES-256-GCM READY</span>
-                  </div>
-                  <button 
-                    type="button" 
-                    onClick={() => setStagedAttachment(null)}
-                    className="text-stark-crimson hover:text-white p-1 transition-colors"
-                    title="Remove Attachment"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              )}
-
-              <div className="flex justify-between px-2 text-[9px] md:text-[10px] font-mono text-arc-cyan/50 uppercase">
-                <span>TX_CONSOLE</span>
-                <span>{((inputText.length + (stagedAttachment ? stagedAttachment.size : 0)) / 1024).toFixed(2)} KB / 15.00 MB MAX</span>
               </div>
-              <div className="flex gap-2">
-                <button 
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadingAttachment}
-                  className="bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 disabled:opacity-50 p-2 md:p-3 text-arc-cyan flex items-center justify-center transition-all duration-200 hover:shadow-glow-cyan"
-                  title="Encrypt & Attach Media"
-                >
-                  {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Paperclip size={16} />}
-                </button>
-                <button 
-                  type="button"
-                  onClick={() => setShowInputEmojiPicker(!showInputEmojiPicker)}
-                  className={`p-2 md:p-3 flex items-center justify-center transition-all duration-200 border ${
-                    showInputEmojiPicker 
-                      ? 'bg-arc-cyan/30 text-white border-arc-cyan shadow-glow-cyan' 
-                      : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan/30 text-arc-cyan hover:shadow-glow-cyan'
-                  }`}
-                  title="Emojis, GIFs & Cyber-Stickers"
-                >
-                  <Smile size={16} />
-                </button>
-                <input 
-                  ref={inputRef}
-                  value={inputText}
-                  onChange={e => {
-                    setInputText(e.target.value);
-                    if (ws.current?.readyState === WebSocket.OPEN) {
-                      if (!window.lastTypingTime || Date.now() - window.lastTypingTime > 1500) {
-                        window.lastTypingTime = Date.now();
-                        if (activeContact) {
-                          ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: activeContact.id }));
-                        } else if (activeGroup) {
-                          for (const m of (activeGroup.members || []).filter(x => x.id !== myId)) {
-                            ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: m.id }));
+            ) : (
+              <form onSubmit={handleSend} className="flex flex-col gap-2 relative">
+                {/* Emoji / GIF / Sticker Dock Tray */}
+                {showInputEmojiPicker && (
+                  <div className="mb-2">
+                    <EmojiGifPicker 
+                      mode="all"
+                      onSelectEmoji={handleInsertEmoji}
+                      onSelectGif={handleSendGif}
+                      onSelectSticker={handleSendSticker}
+                      onClose={() => setShowInputEmojiPicker(false)}
+                    />
+                  </div>
+                )}
+
+                {/* Replying Context Banner */}
+                {replyingTo && (
+                  <div className={`flex items-center justify-between p-2 rounded text-xs animate-in fade-in slide-in-from-bottom-2 duration-150 ${
+                    isFlow ? 'bg-[#111b21] border-l-4 border-[#00a884] border-y border-r border-[#222e35]' : 'bg-stark-card border-l-2 border-arc-cyan border-y border-r border-arc-cyan/30 font-mono shadow-glow-cyan'
+                  }`}>
+                    <div className="flex items-center gap-2 truncate">
+                      <CornerUpLeft size={14} className={isFlow ? 'text-[#00a884] shrink-0' : 'text-arc-cyan shrink-0'} />
+                      <div className="truncate">
+                        <div className={`text-[10px] font-bold tracking-wider uppercase ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}>
+                          REPLYING TO {replyingTo.senderName || (replyingTo.fromMe ? 'YOURSELF' : 'CONTACT')}
+                        </div>
+                        <div className="text-gray-300 text-xs truncate max-w-[260px] md:max-w-md">
+                          {replyingTo.hasAttachment ? '📎 [ATTACHMENT] ' : ''}{replyingTo.text || 'Encrypted Media'}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setReplyingTo(null)}
+                      className="text-gray-400 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                      title="Cancel Reply"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
+
+                {/* Staged Attachment Banner */}
+                {stagedAttachment && (
+                  <div className={`flex items-center justify-between p-2 text-xs rounded ${
+                    isFlow ? 'bg-[#111b21] border border-[#222e35] text-white' : 'bg-arc-cyan/10 border border-arc-cyan/40 font-mono text-arc-cyan'
+                  }`}>
+                    <div className="flex items-center gap-2 truncate">
+                      {stagedAttachment.isImage ? <Image size={14} /> : <FileText size={14} />}
+                      <span className="truncate max-w-[200px]">{stagedAttachment.name}</span>
+                      <span className="text-[10px] opacity-60">({(stagedAttachment.size / 1024).toFixed(1)} KB)</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                        isFlow ? 'bg-[#00a884]/20 text-[#00a884]' : 'bg-arc-cyan/20 text-arc-cyan border border-arc-cyan/40 font-hud tracking-wider'
+                      }`}>AES-256-GCM READY</span>
+                    </div>
+                    <button 
+                      type="button" 
+                      onClick={() => setStagedAttachment(null)}
+                      className="text-red-400 hover:text-white p-1 transition-colors"
+                      title="Remove Attachment"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
+
+                {!isFlow && (
+                  <div className="flex justify-between px-2 text-[9px] md:text-[10px] font-mono text-arc-cyan/50 uppercase">
+                    <span>TX_CONSOLE</span>
+                    <span>{((inputText.length + (stagedAttachment ? stagedAttachment.size : 0)) / 1024).toFixed(2)} KB / 15.00 MB MAX</span>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-1.5 md:gap-2">
+                  <button 
+                    type="button"
+                    onClick={() => setShowInputEmojiPicker(!showInputEmojiPicker)}
+                    className={`p-2.5 flex items-center justify-center transition-all ${
+                      isFlow 
+                        ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
+                        : `border rounded ${showInputEmojiPicker ? 'bg-arc-cyan/30 text-white border-arc-cyan shadow-glow-cyan' : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan/30 text-arc-cyan'}`
+                    }`}
+                    title="Emojis & Stickers"
+                  >
+                    <Smile size={18} />
+                  </button>
+
+                  <button 
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingAttachment}
+                    className={`p-2.5 flex items-center justify-center transition-all ${
+                      isFlow 
+                        ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
+                        : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
+                    }`}
+                    title="Attach Media / Files"
+                  >
+                    {uploadingAttachment ? <Loader2 size={18} className="animate-spin text-stark-gold" /> : <Paperclip size={18} />}
+                  </button>
+
+                  <input 
+                    ref={inputRef}
+                    value={inputText}
+                    onChange={e => {
+                      setInputText(e.target.value);
+                      if (ws.current?.readyState === WebSocket.OPEN) {
+                        if (!window.lastTypingTime || Date.now() - window.lastTypingTime > 1500) {
+                          window.lastTypingTime = Date.now();
+                          if (activeContact) {
+                            ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: activeContact.id }));
+                          } else if (activeGroup) {
+                            for (const m of (activeGroup.members || []).filter(x => x.id !== myId)) {
+                              ws.current.send(JSON.stringify({ type: 'typing', from: myId, to: m.id }));
+                            }
                           }
                         }
                       }
-                    }
-                  }}
-                  className="flex-1 bg-stark-surface border border-arc-cyan/30 p-2 md:p-3 font-mono text-xs text-arc-cyan placeholder:text-arc-cyan/30 focus:outline-none focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50 transition-all"
-                  placeholder={uploadingAttachment ? "Encrypting & uploading attachment..." : (activeGroup ? `> Transmit to "${activeGroup.name}"...` : "> Enter transmission or attach file...")}
-                  maxLength={8000}
-                />
-                <button 
-                  type="submit" 
-                  disabled={(!inputText.trim() && !stagedAttachment) || uploadingAttachment} 
-                  className="group bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan disabled:opacity-50 p-2 md:p-3 text-arc-cyan flex items-center justify-center w-12 md:w-14 transition-all duration-200 hover:shadow-glow-cyan"
-                >
-                  {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Send size={16} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />}
-                </button>
-              </div>
-            </form>
+                    }}
+                    className={`flex-1 p-2.5 md:p-3 text-xs outline-none transition-all ${
+                      isFlow 
+                        ? 'bg-[#2a3942] text-white rounded-full px-4 placeholder:text-gray-400 border border-transparent focus:border-[#00a884]' 
+                        : 'bg-stark-surface border border-arc-cyan/30 font-mono text-arc-cyan placeholder:text-arc-cyan/30 focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50'
+                    }`}
+                    placeholder={uploadingAttachment ? "Encrypting attachment..." : (isFlow ? "Type a message" : (activeGroup ? `> Transmit to "${activeGroup.name}"...` : "> Enter transmission..."))}
+                    maxLength={8000}
+                  />
+
+                  {/* Send or Voice Note Mic Button */}
+                  {(inputText.trim() || stagedAttachment) ? (
+                    <button 
+                      type="submit" 
+                      disabled={uploadingAttachment} 
+                      className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
+                        isFlow 
+                          ? 'w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
+                          : 'w-12 md:w-14 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
+                      }`}
+                      title="Send encrypted message"
+                    >
+                      {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Send size={16} fill={isFlow ? "currentColor" : "none"} />}
+                    </button>
+                  ) : (
+                    <button 
+                      type="button" 
+                      onClick={startAudioRecording}
+                      className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
+                        isFlow 
+                          ? 'w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
+                          : 'w-12 md:w-14 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
+                      }`}
+                      title="Hold / Tap to Record Encrypted Voice Memo"
+                    >
+                      <Mic size={18} />
+                    </button>
+                  )}
+                </div>
+              </form>
+            )}
           </div>
         </div>
       ) : (
@@ -2342,6 +2852,16 @@ export default function ChatLayout({ keys, myId }) {
           </div>
         </div>
       )}
+
+      {/* Zero-Trace Panic Wipe Modal */}
+      <PanicModal
+        isOpen={showPanicModal}
+        onClose={() => setShowPanicModal(false)}
+        onConfirm={() => {
+          setShowPanicModal(false);
+          if (onPanicWipe) onPanicWipe();
+        }}
+      />
     </div>
   );
 }

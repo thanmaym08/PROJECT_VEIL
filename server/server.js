@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { checkConnectionRateLimit, checkMessageRateLimit, validateOrigin } from './rateLimit.js';
-import { savePreKeyBundle, fetchPreKeyBundle, getRemainingOpkCount, statements } from './db.js';
+import { savePreKeyBundle, saveOneTimePreKeys, fetchPreKeyBundle, getRemainingOpkCount, statements } from './db.js';
 import { getServerSigningKey } from './serverKey.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 
@@ -114,6 +114,13 @@ const server = http.createServer((req, res) => {
 
   // Upload Encrypted Attachment: POST /api/attachment
   if (req.method === 'POST' && url.pathname === '/api/attachment') {
+    const clientIp = req.socket.remoteAddress;
+    if (!checkConnectionRateLimit(clientIp)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Upload rate limit exceeded. Please wait before uploading again.' }));
+      return;
+    }
+
     const attachmentId = randomUUID();
     const filePath = path.join(ATTACHMENT_DIR, `${attachmentId}.enc`);
     const fileStream = createWriteStream(filePath);
@@ -191,9 +198,15 @@ const server = http.createServer((req, res) => {
 
   // Serve static client frontend if available
   if (STATIC_DIR && (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/')) {
-    let safePath = path.normalize(url.pathname).replace(/^(\.\.[\/\\])+/, '');
-    if (safePath === '/' || safePath === '\\') safePath = 'index.html';
-    let targetPath = path.join(STATIC_DIR, safePath);
+    const rawPath = path.normalize(url.pathname).replace(/^(\.\.[\/\\])+/, '');
+    const safeSubPath = (rawPath === '/' || rawPath === '\\') ? 'index.html' : rawPath.replace(/^[/\\]+/, '');
+    const targetPath = path.resolve(STATIC_DIR, safeSubPath);
+
+    if (!targetPath.startsWith(STATIC_DIR)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Access Denied' }));
+      return;
+    }
 
     if (existsSync(targetPath) && statSync(targetPath).isFile()) {
       const ext = path.extname(targetPath).toLowerCase();
@@ -308,8 +321,39 @@ wss.on('connection', (ws, req) => {
         break;
       }
       case 'register': {
-        const { cipherId, mlkemPub, x25519Pub, ed25519Pub, deliveryToken, fcmToken, bundle } = data;
+        const { cipherId, mlkemPub, x25519Pub, ed25519Pub, deliveryToken, fcmToken, bundle, registrationSig, timestamp } = data;
         if (!cipherId || !mlkemPub || !x25519Pub) return;
+
+        // VULN-01: Cryptographic Proof-of-Possession Verification
+        if (ed25519Pub) {
+          if (!registrationSig || !timestamp) {
+            ws.send(JSON.stringify({ type: 'error', code: 401, message: 'Proof-of-Possession signature required' }));
+            return;
+          }
+          if (Math.abs(Date.now() - timestamp) > 60000) {
+            ws.send(JSON.stringify({ type: 'error', code: 401, message: 'Registration timestamp expired' }));
+            return;
+          }
+          const msgBytes = Buffer.from(`VEIL-REGISTER:${cipherId}:${timestamp}`);
+          try {
+            const valid = ed25519.verify(Buffer.from(registrationSig, 'base64'), msgBytes, Buffer.from(ed25519Pub, 'base64'));
+            if (!valid) {
+              ws.send(JSON.stringify({ type: 'error', code: 403, message: 'Invalid Proof-of-Possession signature' }));
+              return;
+            }
+          } catch (err) {
+            ws.send(JSON.stringify({ type: 'error', code: 403, message: 'Signature verification failure' }));
+            return;
+          }
+        }
+
+        // Anti-Impersonation: Prevent malicious takeover of pre-existing identities
+        const existingIdentity = statements.getUserIdentity.get(cipherId);
+        if (existingIdentity && existingIdentity.identityEd25519Pub && ed25519Pub && existingIdentity.identityEd25519Pub !== ed25519Pub) {
+          console.warn(`[SECURITY] Rejected impersonation attempt on cipherId: ${cipherId}`);
+          ws.send(JSON.stringify({ type: 'error', code: 409, message: 'Identity key conflict for cipherId' }));
+          return;
+        }
 
         // Save into DB
         savePreKeyBundle(cipherId, mlkemPub, x25519Pub, ed25519Pub, deliveryToken, fcmToken, bundle || {});
@@ -348,7 +392,8 @@ wss.on('connection', (ws, req) => {
       case 'upload_opk': {
         const { cipherId, oneTimePreKeys } = data;
         if (connectionMap.get(ws) !== cipherId) return; // auth check
-        savePreKeyBundle(cipherId, null, null, null, { oneTimePreKeys });
+        // VULN-05: Call dedicated saveOneTimePreKeys without touching NOT NULL user columns
+        saveOneTimePreKeys(cipherId, oneTimePreKeys);
         break;
       }
 
@@ -473,7 +518,11 @@ wss.on('connection', (ws, req) => {
       case 'vanish_mode':
       case 'session_repair': {
         const { from, to } = data;
-        if (!from || !to) return;
+        const senderId = connectionMap.get(ws);
+        if (!from || !to || !senderId || senderId !== from) {
+          console.warn(`[SECURITY] Blocked unauthenticated/spoofed ${data.type} from socket`);
+          return;
+        }
         const target = identities.get(to);
         if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
           target.ws.send(JSON.stringify(data));
@@ -482,7 +531,11 @@ wss.on('connection', (ws, req) => {
       }
       case 'msg': {
         const { from, to, seq } = data;
-        if (!from || !to) return; // Malformed
+        const senderId = connectionMap.get(ws);
+        if (!from || !to || !senderId || senderId !== from) {
+          console.warn(`[SECURITY] Blocked unauthenticated/spoofed msg from socket`);
+          return;
+        }
 
         // Update sender's lastSeen if registered
         const sender = identities.get(from);

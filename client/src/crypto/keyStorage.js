@@ -42,6 +42,20 @@ async function getStore(key) {
   }
 }
 
+let activeVaultKey = null;
+
+export function getActiveVaultKey() {
+  return activeVaultKey;
+}
+
+export function setActiveVaultKey(key) {
+  activeVaultKey = key;
+}
+
+export function clearActiveVaultKey() {
+  activeVaultKey = null;
+}
+
 export async function wrapAndStoreKeys(passphraseStr, identityKeyBundle) {
   const salt = new Uint8Array(16);
   crypto.getRandomValues(salt);
@@ -57,8 +71,9 @@ export async function wrapAndStoreKeys(passphraseStr, identityKeyBundle) {
     keyBytes,
     { name: "AES-GCM" },
     false,
-    ["encrypt"]
+    ["encrypt", "decrypt"]
   );
+  activeVaultKey = aesKey;
 
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
@@ -97,8 +112,9 @@ export async function unwrapKeys(passphraseStr) {
     keyBytes,
     { name: "AES-GCM" },
     false,
-    ["decrypt"]
+    ["encrypt", "decrypt"]
   );
+  activeVaultKey = aesKey;
 
   try {
     const plaintextBuf = await crypto.subtle.decrypt(
@@ -123,9 +139,47 @@ export async function hasVault() {
 }
 
 export async function saveRatchetState(contactId, stateStr) {
-  await setStore(`ratchet_${contactId}`, stateStr);
+  if (stateStr === null) {
+    await setStore(`ratchet_${contactId}`, null);
+    return;
+  }
+  if (activeVaultKey) {
+    const iv = new Uint8Array(12);
+    crypto.getRandomValues(iv);
+    const ctBuf = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      activeVaultKey,
+      utf8ToBytes(stateStr)
+    );
+    await setStore(`ratchet_${contactId}`, {
+      __enc: true,
+      iv: bytesToBase64(iv),
+      ct: bytesToBase64(new Uint8Array(ctBuf))
+    });
+  } else {
+    await setStore(`ratchet_${contactId}`, stateStr);
+  }
 }
 
 export async function getRatchetState(contactId) {
-  return await getStore(`ratchet_${contactId}`);
+  const stored = await getStore(`ratchet_${contactId}`);
+  if (!stored) return null;
+  if (typeof stored === 'object' && stored.__enc && stored.iv && stored.ct) {
+    if (!activeVaultKey) {
+      console.warn("Active vault key unavailable; cannot decrypt ratchet state");
+      return null;
+    }
+    try {
+      const plaintextBuf = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: base64ToBytes(stored.iv) },
+        activeVaultKey,
+        base64ToBytes(stored.ct)
+      );
+      return new TextDecoder().decode(plaintextBuf);
+    } catch (e) {
+      console.error("Failed to decrypt ratchet state:", e);
+      return null;
+    }
+  }
+  return stored;
 }

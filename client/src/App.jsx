@@ -50,6 +50,16 @@ export default function App() {
 
   if (view === 'loading') return <div className="min-h-screen bg-stark-bg text-white flex items-center justify-center font-hud text-2xl tracking-widest text-arc-cyan">INITIALIZING...</div>;
 
+  const handleLock = async () => {
+    try {
+      const { clearActiveVaultKey } = await import('./crypto/keyStorage');
+      clearActiveVaultKey();
+    } catch {}
+    setKeys(null);
+    setMyId(null);
+    setView('gate');
+  };
+
   const handleReset = async () => {
     if (window.Capacitor?.isNative) {
       try {
@@ -63,6 +73,8 @@ export default function App() {
       }
     } else {
       localStorage.removeItem('veil_vault');
+      localStorage.removeItem('veil_my_name');
+      localStorage.removeItem('veil_app_mode');
     }
     
     // Also clear IndexedDB
@@ -71,6 +83,13 @@ export default function App() {
       indexedDB.deleteDatabase('veil_vault');
     } catch (e) {}
 
+    try {
+      const { clearActiveVaultKey } = await import('./crypto/keyStorage');
+      clearActiveVaultKey();
+    } catch {}
+
+    setKeys(null);
+    setMyId(null);
     setView('onboarding');
   };
 
@@ -85,7 +104,7 @@ export default function App() {
       <div className="relative z-10 flex flex-col flex-1 h-full">
         {view === 'gate' && <PassphraseGate onUnlock={handleKeysUnlocked} onReset={handleReset} />}
         {view === 'onboarding' && <Onboarding onComplete={handleKeysUnlocked} />}
-        {view === 'chat' && <ChatLayout keys={keys} myId={myId} />}
+        {view === 'chat' && <ChatLayout keys={keys} myId={myId} onLock={handleLock} onPanicWipe={handleReset} />}
       </div>
     </div>
   );

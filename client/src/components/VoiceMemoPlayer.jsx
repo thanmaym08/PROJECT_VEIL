@@ -70,10 +70,20 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
   ];
 
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  const togglePlaybackSpeed = () => {
+    const nextSpeed = playbackSpeed === 1 ? 1.5 : (playbackSpeed === 1.5 ? 2 : 1);
+    setPlaybackSpeed(nextSpeed);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = nextSpeed;
+    }
+  };
+
   const isFlow = appMode === 'flow';
 
   return (
-    <div className={`flex items-center gap-3 p-2.5 rounded-xl max-w-xs transition-all ${
+    <div className={`flex items-center gap-2.5 p-2.5 rounded-xl max-w-xs transition-all ${
       isFlow 
         ? 'bg-[#182229]/90 border border-emerald-500/20 text-white' 
         : 'bg-stark-surface/90 border border-arc-cyan/40 text-arc-cyan shadow-glow-cyan'
@@ -95,7 +105,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
       </button>
 
       {/* Waveform and Progress Bar */}
-      <div className="flex-1 flex flex-col justify-center gap-1 min-w-[130px]">
+      <div className="flex-1 flex flex-col justify-center gap-1 min-w-[120px]">
         <div 
           onClick={handleSeek} 
           className="flex items-center gap-[2px] h-6 cursor-pointer py-1 group"
@@ -127,8 +137,22 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
         </div>
       </div>
 
+      {/* Speed Multiplier Button (1x / 1.5x / 2x) */}
+      <button
+        type="button"
+        onClick={togglePlaybackSpeed}
+        className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold transition-all shrink-0 ${
+          playbackSpeed > 1
+            ? (isFlow ? 'bg-[#00a884] text-white shadow-sm' : 'bg-arc-cyan text-black')
+            : (isFlow ? 'bg-[#2a3942] text-gray-300 hover:text-white' : 'bg-arc-cyan/10 text-arc-cyan/70 hover:text-arc-cyan')
+        }`}
+        title="Cycle playback speed (1x -> 1.5x -> 2x)"
+      >
+        {playbackSpeed}x
+      </button>
+
       <div className="shrink-0 opacity-40">
-        <Volume2 size={14} className={isFlow ? 'text-gray-400' : 'text-arc-cyan'} />
+        <Volume2 size={13} className={isFlow ? 'text-gray-400' : 'text-arc-cyan'} />
       </div>
     </div>
   );

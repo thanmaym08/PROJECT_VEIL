@@ -1,8 +1,15 @@
 import { WebSocketServer } from 'ws';
 import { checkConnectionRateLimit, checkMessageRateLimit, validateOrigin } from './rateLimit.js';
-import { savePreKeyBundle, saveOneTimePreKeys, fetchPreKeyBundle, getRemainingOpkCount, statements } from './db.js';
+import { savePreKeyBundle, saveOneTimePreKeys, fetchPreKeyBundle, getRemainingOpkCount, statements, savePushSub, getPushSub, deletePushSub, getServerSetting, setServerSetting } from './db.js';
 import { getServerSigningKey } from './serverKey.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
+import webpush from 'web-push';
+import { initializeApp, cert } from 'firebase-admin/app';
+import { getMessaging } from 'firebase-admin/messaging';
+import { readFileSync, existsSync, mkdirSync, createWriteStream, createReadStream, statSync, unlink, readdir, stat } from 'fs';
+import http from 'http';
+import path from 'path';
+import { randomUUID } from 'crypto';
 
 // Load server key
 const serverKey = getServerSigningKey();
@@ -11,15 +18,29 @@ console.log('Server Identity (Ed25519 Pub):', Buffer.from(serverKey.publicKey).t
 // Configuration
 const MAX_PAYLOAD_SIZE = 65536; // 64 KB
 const MAX_QUEUE_SIZE = 50;
-const MESSAGE_TTL = 86400000; // 24 hours (increased from 1 hr)
+const MESSAGE_TTL = 86400000; // 24 hours
 const IDENTITY_TTL = 259200000; // 72 hours
 
-import { initializeApp, cert } from 'firebase-admin/app';
-import { getMessaging } from 'firebase-admin/messaging';
-import { readFileSync, existsSync, mkdirSync, createWriteStream, createReadStream, statSync, unlink, readdir, stat } from 'fs';
-import http from 'http';
-import path from 'path';
-import { randomUUID } from 'crypto';
+// Web Push VAPID Configuration
+let vapidPublicKey = process.env.VAPID_PUBLIC_KEY || getServerSetting('vapid_public_key');
+let vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || getServerSetting('vapid_private_key');
+
+if (!vapidPublicKey || !vapidPrivateKey) {
+  const generated = webpush.generateVAPIDKeys();
+  vapidPublicKey = generated.publicKey;
+  vapidPrivateKey = generated.privateKey;
+  setServerSetting('vapid_public_key', vapidPublicKey);
+  setServerSetting('vapid_private_key', vapidPrivateKey);
+  console.log('[PUSH] Generated fresh persistent VAPID keys for Web Push');
+} else {
+  console.log('[PUSH] Loaded persistent VAPID keys');
+}
+
+webpush.setVapidDetails(
+  process.env.VAPID_SUBJECT || 'mailto:security@projectveil.io',
+  vapidPublicKey,
+  vapidPrivateKey
+);
 
 let firebaseEnabled = false;
 try {
@@ -43,6 +64,53 @@ try {
   }
 } catch(e) {
   console.warn("Firebase Admin failed to init, skipping push capabilities. Error:", e.message);
+}
+
+export async function sendPrivacyMaskedPush(cipherId, payloadType = 'message') {
+  // 1. Web Push (Standard / PWA / Desktop / Mobile Browser)
+  const sub = getPushSub(cipherId);
+  if (sub) {
+    const payload = JSON.stringify({
+      title: 'Project VEIL',
+      body: payloadType === 'call' ? 'Incoming encrypted call...' : 'New encrypted transmission',
+      type: payloadType
+    });
+    webpush.sendNotification(sub, payload).catch(err => {
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        console.log(`[PUSH] Subscription expired for ${cipherId}, removing`);
+        deletePushSub(cipherId);
+      } else {
+        console.warn(`[PUSH] WebPush dispatch error for ${cipherId}:`, err.message);
+      }
+    });
+  }
+
+  // 2. Firebase FCM (Native Android / iOS) if enabled
+  if (firebaseEnabled) {
+    const userRow = statements.getUserIdentity.get(cipherId);
+    if (userRow && userRow.fcmToken) {
+      getMessaging().send({
+        token: userRow.fcmToken,
+        notification: {
+          title: 'Project VEIL',
+          body: payloadType === 'call' ? 'Incoming encrypted call...' : 'New encrypted transmission'
+        },
+        data: {
+          type: payloadType,
+          timestamp: String(Date.now())
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            sound: 'default',
+            channelId: 'veil_transmissions'
+          }
+        }
+      }).catch(err => {
+        console.warn(`[FCM] Push dispatch error for ${cipherId}:`, err.message);
+      });
+    }
+  }
 }
 
 // Attachment Storage Configuration (24-hour ephemeral retention)
@@ -109,6 +177,66 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/health' || url.pathname === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
+    return;
+  }
+
+  // Web Push: VAPID Public Key GET
+  if (req.method === 'GET' && url.pathname === '/api/push/vapid-key') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ publicKey: vapidPublicKey }));
+    return;
+  }
+
+  // Web Push: Subscribe POST
+  if (req.method === 'POST' && url.pathname === '/api/push/subscribe') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 8192) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body);
+        const id = parsed.identityId || parsed.cipherId;
+        if (!id || !parsed.subscription) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing identityId or subscription' }));
+          return;
+        }
+        savePushSub(id, parsed.subscription);
+        console.log(`[PUSH] Registered push subscription for ${id}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+      }
+    });
+    return;
+  }
+
+  // Web Push: Unsubscribe POST
+  if (req.method === 'POST' && url.pathname === '/api/push/unsubscribe') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 4096) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body);
+        const id = parsed.identityId || parsed.cipherId;
+        if (id) {
+          deletePushSub(id);
+          console.log(`[PUSH] Removed push subscription for ${id}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+      }
+    });
     return;
   }
 
@@ -275,6 +403,7 @@ wss.on('close', () => clearInterval(heartbeatInterval));
 // State Structures (Strictly In-Memory)
 const identities = new Map();
 const offlineQueues = new Map();
+const linkSessions = new Map(); // sessionId -> { ws, createdAt }
 // Mapping ws -> cipherId for cleanup on disconnect
 const connectionMap = new WeakMap(); 
 
@@ -501,18 +630,91 @@ wss.on('connection', (ws, req) => {
              queuedAt: Date.now(), 
              envelope: { type: 'sealed_msg', to, ephemeralPublicKey, envelopeCiphertext, iv, mac } 
            });
-           
-           if (targetId.fcmToken && firebaseEnabled) {
-             getMessaging().send({
-               token: targetId.fcmToken,
-               notification: { title: "PROJECT VEIL", body: "Incoming Encrypted Transmission" },
-               data: { wakeup: "true" },
-               android: { priority: "high" }
-             }).catch(e => console.error("FCM Error:", e.message));
+           if (offlineQueues.get(to).length > MAX_QUEUE_SIZE) {
+             offlineQueues.get(to).shift();
            }
+           
+           sendPrivacyMaskedPush(to, 'message');
         }
         break;
       }
+
+      case 'device_link_init': {
+        const { sessionId } = data;
+        if (!sessionId || typeof sessionId !== 'string') return;
+        linkSessions.set(sessionId, { ws, createdAt: Date.now() });
+        ws.send(JSON.stringify({ type: 'device_link_init_ack', sessionId }));
+        break;
+      }
+
+      case 'device_link_transfer': {
+        const { sessionId, ephemeralPub, payload, iv, tag } = data;
+        const senderId = connectionMap.get(ws);
+        if (!senderId) {
+          ws.send(JSON.stringify({ type: 'device_link_error', sessionId, message: 'Authentication required' }));
+          return;
+        }
+        const session = linkSessions.get(sessionId);
+        if (!session || session.ws.readyState !== ws.OPEN) {
+          ws.send(JSON.stringify({ type: 'device_link_error', sessionId, message: 'Secondary device pairing session expired or offline' }));
+          return;
+        }
+        session.ws.send(JSON.stringify({
+          type: 'device_link_transfer',
+          sessionId,
+          ephemeralPub,
+          payload,
+          iv,
+          tag,
+          senderId
+        }));
+        break;
+      }
+
+      case 'device_link_ack': {
+        const { sessionId, ok, to } = data;
+        linkSessions.delete(sessionId);
+        if (to) {
+          const primaryTarget = identities.get(to);
+          if (primaryTarget && primaryTarget.ws && primaryTarget.ws.readyState === ws.OPEN) {
+            primaryTarget.ws.send(JSON.stringify({ type: 'device_link_ack', sessionId, ok }));
+          }
+        }
+        break;
+      }
+
+      case 'group_call_invite': {
+        const { groupId, groupName, from, callType, recipients } = data;
+        const senderId = connectionMap.get(ws);
+        if (!senderId || senderId !== from || !Array.isArray(recipients)) return;
+        for (const recipientId of recipients) {
+          if (recipientId === from) continue;
+          const target = identities.get(recipientId);
+          if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
+            target.ws.send(JSON.stringify(data));
+          } else {
+            sendPrivacyMaskedPush(recipientId, 'call');
+          }
+        }
+        break;
+      }
+
+      case 'group_call_join': {
+        const { groupId, from, name, recipients } = data;
+        const senderId = connectionMap.get(ws);
+        if (!senderId || senderId !== from) return;
+        if (Array.isArray(recipients)) {
+          for (const recipientId of recipients) {
+            if (recipientId === from) continue;
+            const target = identities.get(recipientId);
+            if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
+              target.ws.send(JSON.stringify(data));
+            }
+          }
+        }
+        break;
+      }
+
       case 'typing':
       case 'read':
       case 'vanish_mode':
@@ -522,7 +724,11 @@ wss.on('connection', (ws, req) => {
       case 'call_ice_candidate':
       case 'call_end':
       case 'call_reject':
-      case 'call_busy': {
+      case 'call_busy':
+      case 'group_call_offer':
+      case 'group_call_answer':
+      case 'group_call_ice':
+      case 'group_call_leave': {
         const { from, to } = data;
         const senderId = connectionMap.get(ws);
         if (!from || !to || !senderId || senderId !== from) {
@@ -533,6 +739,7 @@ wss.on('connection', (ws, req) => {
         if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
           target.ws.send(JSON.stringify(data));
         } else if (data.type === 'call_offer') {
+          sendPrivacyMaskedPush(to, 'call');
           if (ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({ type: 'call_reject', from: to, to: from, reason: 'offline' }));
           }
@@ -576,18 +783,8 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify({ type: 'ack', to, seq, status: 'queued' }));
           }
 
-          // Trigger Zero-Knowledge Push Notification
-          if (target && target.fcmToken && firebaseEnabled) {
-            getMessaging().send({
-              token: target.fcmToken,
-              notification: {
-                title: "PROJECT VEIL",
-                body: "Incoming Encrypted Transmission"
-              },
-              data: { wakeup: "true" },
-              android: { priority: "high" }
-            }).catch(e => console.error("FCM Error:", e.message));
-          }
+          // Trigger Zero-Knowledge Privacy-Masked Push Notification (WebPush + FCM)
+          sendPrivacyMaskedPush(to, 'message');
         }
         break;
       }
@@ -601,6 +798,11 @@ wss.on('connection', (ws, req) => {
       if (identity && identity.ws === ws) {
         identity.ws = null; // Mark offline
         identity.lastSeen = Date.now();
+      }
+    }
+    for (const [sId, session] of linkSessions.entries()) {
+      if (session.ws === ws) {
+        linkSessions.delete(sId);
       }
     }
   });
@@ -624,6 +826,13 @@ setInterval(() => {
       offlineQueues.delete(cipherId);
     } else {
       offlineQueues.set(cipherId, activeQueue);
+    }
+  }
+
+  // Clean expired link sessions (older than 5 minutes)
+  for (const [sId, session] of linkSessions.entries()) {
+    if (now - session.createdAt > 300000) {
+      linkSessions.delete(sId);
     }
   }
 

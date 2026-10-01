@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, updateMessageFields, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup, getAllStarredMessages } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
-import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Unlock, Zap, Radio, Phone, Video, Star, Pin, BarChart2, Camera, Edit3, Eye, EyeOff, Palette, Database, AtSign } from 'lucide-react';
+import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Unlock, Zap, Radio, Phone, Video, Star, Pin, BarChart2, Camera, Edit3, Eye, EyeOff, Palette, Database, AtSign, Laptop } from 'lucide-react';
 import AddContactModal from './AddContactModal';
 import SafetyNumberModal from './SafetyNumberModal';
 import CreateGroupModal from './CreateGroupModal';
@@ -18,6 +18,9 @@ import ForwardModal from './ForwardModal';
 import WallpaperModal, { WALLPAPERS } from './WallpaperModal';
 import BackupModal from './BackupModal';
 import CreateBroadcastModal from './CreateBroadcastModal';
+import LinkedDevicesModal from './LinkedDevicesModal';
+import GroupCallModal from './GroupCallModal';
+import { subscribeToPushNotifications, unsubscribeFromPushNotifications, isPushNotificationSupported } from '../utils/pushNotifications';
 import { computeInitiatorSession, computeReceiverSession } from '../crypto/handshake';
 import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes, bytesToBase64, utf8ToBytes } from '../crypto/utils';
@@ -145,8 +148,14 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
   const [showSearch, setShowSearch] = useState(false);
   const [showPanicModal, setShowPanicModal] = useState(false);
 
-  // WebRTC Call State
+  // WebRTC Direct & Group Call Mesh State
   const [callState, setCallState] = useState(null);
+  const [groupCallState, setGroupCallState] = useState(null);
+  const [incomingGroupCall, setIncomingGroupCall] = useState(null);
+  const [showLinkedDevices, setShowLinkedDevices] = useState(false);
+  const [pushEnabled, setPushEnabled] = useState(() => {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('veil_push_enabled') === 'true';
+  });
 
   // Feature Modals
   const [showCameraSnap, setShowCameraSnap] = useState(false);
@@ -1100,6 +1109,24 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       } else if (data.type === 'call_end' || data.type === 'call_reject') {
         setCallState(null);
         showToast(data.type === 'call_reject' ? (data.reason === 'offline' ? 'Peer is offline' : 'Call declined') : 'Call ended');
+      } else if (data.type === 'group_call_invite') {
+        const callerName = data.name || `Member-${data.from.slice(0, 4)}`;
+        setIncomingGroupCall({
+          groupId: data.groupId,
+          groupName: data.groupName,
+          from: data.from,
+          name: callerName,
+          callType: data.callType || 'audio'
+        });
+      } else if (data.type === 'group_call_join' || data.type === 'group_call_offer' || data.type === 'group_call_answer' || data.type === 'group_call_ice' || data.type === 'group_call_leave') {
+        window.dispatchEvent(new CustomEvent('veil_group_call_signal', { detail: data }));
+      } else if (data.type === 'device_link_init_ack' || data.type === 'device_link_transfer' || data.type === 'device_link_ack' || data.type === 'device_link_error') {
+        window.dispatchEvent(new CustomEvent('veil_ws_message', { detail: data }));
+        if (data.type === 'device_link_ack') {
+          showToast("Secondary device paired successfully!");
+        } else if (data.type === 'device_link_error') {
+          showToast("Device pairing error: " + (data.message || 'Failed'));
+        }
       } else if (data.type === 'prekeys_res') {
         const resolver = pendingBundleRequests.current[data.targetCipherId];
         if (resolver) {
@@ -1648,6 +1675,41 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       callType,
       peer: activeContact
     });
+  };
+
+  const handleStartGroupCall = (callType = 'audio') => {
+    if (!activeGroup) {
+      showToast("Select a group to start an encrypted mesh call");
+      return;
+    }
+    setGroupCallState({
+      groupId: activeGroup.id,
+      groupName: activeGroup.name,
+      callType,
+      members: activeGroup.members || [],
+      mode: 'initiating'
+    });
+  };
+
+  const handleTogglePushNotifications = async () => {
+    if (!isPushNotificationSupported()) {
+      showToast("Push notifications not supported in this browser environment.");
+      return;
+    }
+    try {
+      if (pushEnabled) {
+        await unsubscribeFromPushNotifications(myId);
+        setPushEnabled(false);
+        showToast("Push notifications disabled.");
+      } else {
+        await subscribeToPushNotifications(myId);
+        setPushEnabled(true);
+        showToast("Zero-knowledge push wake signal active!");
+      }
+    } catch (err) {
+      console.warn("[PUSH] Toggle error:", err);
+      showToast("Push activation: " + (err.message || 'Permission denied'));
+    }
   };
 
   const handleCreatePoll = async (pollData) => {
@@ -2246,6 +2308,28 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 <Database size={16} />
               </button>
               <button 
+                onClick={() => setShowLinkedDevices(true)} 
+                className={`p-1.5 rounded transition-colors ${
+                  isFlow 
+                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+                }`}
+                title="Linked Devices (Multi-Device Sync)"
+              >
+                <Laptop size={16} />
+              </button>
+              <button 
+                onClick={handleTogglePushNotifications} 
+                className={`p-1.5 rounded transition-colors ${
+                  pushEnabled 
+                    ? (isFlow ? 'text-emerald-400 bg-emerald-500/20' : 'text-arc-cyan bg-arc-cyan/20 border border-arc-cyan shadow-glow-cyan')
+                    : (isFlow ? 'text-gray-400 hover:text-white hover:bg-white/10' : 'text-arc-cyan/50 hover:bg-arc-cyan/10 border border-arc-cyan/20')
+                }`}
+                title={pushEnabled ? "Zero-Knowledge Push Wake: ACTIVE (Click to toggle)" : "Zero-Knowledge Push Wake: OFF (Click to enable)"}
+              >
+                <Zap size={16} className={pushEnabled ? "animate-pulse" : ""} />
+              </button>
+              <button 
                 onClick={() => setShowCreateGroup(true)} 
                 className={`p-1.5 rounded transition-colors flex items-center gap-0.5 ${
                   isFlow 
@@ -2787,6 +2871,22 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleStartGroupCall('audio')}
+                    className="p-2 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
+                    title="Start Encrypted Group Voice Mesh"
+                  >
+                    <Phone size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStartGroupCall('video')}
+                    className="p-2 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
+                    title="Start Encrypted Group Video Mesh"
+                  >
+                    <Video size={17} />
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowSearch(!showSearch)}
@@ -4118,6 +4218,74 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           onClose={() => setShowCreateBroadcast(false)}
           contacts={contacts}
           onCreateBroadcast={handleCreateBroadcast}
+        />
+      )}
+
+      {/* Incoming Group Call Prompt */}
+      {incomingGroupCall && (
+        <div className="fixed top-5 right-5 z-50 p-4 rounded-2xl bg-[#111b21]/95 border border-[#00a884] shadow-2xl backdrop-blur-md flex items-center gap-4 text-white animate-in slide-in-from-top-4">
+          <div className="p-3 bg-[#00a884]/20 text-[#00a884] rounded-xl animate-bounce">
+            <Phone size={22} />
+          </div>
+          <div>
+            <div className="font-bold text-sm">Incoming Group {incomingGroupCall.callType === 'video' ? 'Video' : 'Voice'} Call</div>
+            <div className="text-xs text-gray-300">{incomingGroupCall.groupName} • {incomingGroupCall.name}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const group = groupsRef.current.find(g => g.id === incomingGroupCall.groupId) || { id: incomingGroupCall.groupId, name: incomingGroupCall.groupName, members: [] };
+                setGroupCallState({
+                  groupId: incomingGroupCall.groupId,
+                  groupName: incomingGroupCall.groupName,
+                  callType: incomingGroupCall.callType,
+                  members: group.members || [],
+                  mode: 'joined'
+                });
+                setIncomingGroupCall(null);
+              }}
+              className="px-3 py-1.5 bg-[#00a884] hover:bg-[#02906f] text-white rounded-lg text-xs font-bold transition-all shadow-md"
+            >
+              JOIN
+            </button>
+            <button
+              onClick={() => setIncomingGroupCall(null)}
+              className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-xs font-semibold transition-all"
+            >
+              DECLINE
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Group Multi-Party WebRTC Mesh Call Modal */}
+      {groupCallState && (
+        <GroupCallModal
+          groupCallState={groupCallState}
+          myId={myId}
+          myName={keys?.nickname || localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`}
+          appMode={appMode}
+          sendSignalingMessage={sendSignalingMessage}
+          onClose={() => setGroupCallState(null)}
+        />
+      )}
+
+      {/* Linked Devices (Multi-Device Sync) Modal */}
+      {showLinkedDevices && (
+        <LinkedDevicesModal
+          myId={myId}
+          keys={keys}
+          appMode={appMode}
+          sendWsMessage={(msgObj) => {
+            if (ws.current?.readyState === WebSocket.OPEN) {
+              ws.current.send(JSON.stringify(msgObj));
+            }
+          }}
+          onClose={() => setShowLinkedDevices(false)}
+          onDeviceLinkedSuccess={(newBundle) => {
+            showToast("Device linked & keys imported successfully!");
+            window.location.reload();
+          }}
         />
       )}
 

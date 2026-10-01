@@ -30,13 +30,19 @@ PROJECT_VEIL/
 │   │   │   ├── prekeys.js         # One-time & Signed Prekey generation/validation
 │   │   │   ├── mediaCipher.js     # AES-256-GCM attachment encryption & chunking
 │   │   │   ├── sealedSender.js    # Envelope packing/unpacking with delivery tokens
+│   │   │   ├── deviceLink.js      # Ephemeral X25519 + AES-256-GCM multi-device pairing
 │   │   │   ├── keyStorage.js      # Master key derivation (Argon2id/PBKDF2) & biometric store
 │   │   │   └── utils.js           # Base64, Hex, and Uint8Array cryptographic helpers
+│   │   ├── utils/
+│   │   │   └── pushNotifications.js # WebPush registration & zero-knowledge wake signals
 │   │   ├── storage/
 │   │   │   └── db.js              # IndexedDB with AES-256-GCM at-rest encryption & backups
 │   │   ├── components/
 │   │   │   ├── ChatLayout.jsx     # Master dual-mode UI, socket routing & message loop
-│   │   │   ├── CallModal.jsx      # WebRTC P2P audio/video calling interface
+│   │   │   ├── CallModal.jsx      # WebRTC 1-on-1 P2P audio/video calling interface
+│   │   │   ├── GroupCallModal.jsx # WebRTC 3-4 participant audio/video full mesh
+│   │   │   ├── LinkedDevicesModal.jsx # Multi-device E2EE QR camera pairing & session sync
+│   │   │   ├── VoiceMemoPlayer.jsx # Waveform player with 1x, 1.5x, 2x playback speed
 │   │   │   ├── CameraSnapModal.jsx# In-app camera viewfinder & instant snap
 │   │   │   ├── CreatePollModal.jsx# Interactive in-chat poll creator
 │   │   │   ├── StarredMessagesModal.jsx # Starred messages search drawer
@@ -51,7 +57,7 @@ PROJECT_VEIL/
 │   │   ├── App.jsx                # Lifecycle router & passphrase gate
 │   │   └── index.css              # Tailwind CSS styles & HUD animations
 │   ├── test/
-│   │   └── crypto.test.js         # Comprehensive 4-vector cryptographic test suite
+│   │   └── crypto.test.js         # Comprehensive 5-vector cryptographic test suite
 │   ├── capacitor.config.ts        # Android mobile configuration
 │   └── package.json
 ├── server/
@@ -121,7 +127,8 @@ Expected output:
 - `[2] Multi-turn Reply (Bob -> Alice): ✅ PASS`
 - `[3] Follow-up Message (Alice -> Bob): ✅ PASS`
 - `[4] Header AAD Tamper Rejection (MitM Deflection): ✅ PASS`
-- `✅ ALL 4 CRYPTOGRAPHIC PIPELINES VERIFIED 100%`
+- `[5] Multi-Device Ephemeral E2EE Link & Tamper Shield: ✅ PASS`
+- `✅ ALL 5 CRYPTOGRAPHIC PIPELINES VERIFIED 100%`
 
 ### Run Client Production Build
 ```bash

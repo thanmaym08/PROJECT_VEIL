@@ -57,6 +57,10 @@
 
 ### Phase 9: Veil Flow Rich Productivity & Media Suite
 - [x] **P2P WebRTC Video & Audio Calls:** Direct calling with STUN fallback, camera flip, mic mute, duration timer, and server-authenticated signaling (`CallModal.jsx`).
+- [x] **Group Multi-Party WebRTC Mesh Calls:** 3-4 participant audio and video mesh calls without centralized media servers (`GroupCallModal.jsx`).
+- [x] **Voice Note Playback Speed:** 1x, 1.5x, 2x playback speed toggles in the waveform voice note player (`VoiceMemoPlayer.jsx`).
+- [x] **Zero-Knowledge Background Push Notifications:** Privacy-masked wake signal (`"New encrypted transmission"`) delivered via WebPush / FCM without leaking contact names, sender IDs, or content to Apple/Google.
+- [x] **Multi-Device Terminal Sync (Linked Devices):** Ephemeral X25519 + AES-256-GCM QR pairing to link secondary desktop/tablet browsers without transmitting private keys to the server (`LinkedDevicesModal.jsx`, `deviceLink.js`).
 - [x] **View Once Media:** Ephemeral photos stored only in RAM, revoked and deleted immediately upon modal close.
 - [x] **In-App Camera Snap:** Real-time viewfinder with front/back lens toggle and direct staging (`CameraSnapModal.jsx`).
 - [x] **Interactive In-Chat Polls:** Poll creation up to 6 options, live percentage bars, and encrypted vote fan-out (`CreatePollModal.jsx`).
@@ -77,24 +81,20 @@
 
 | Test Suite / Build Target | Command | Status |
 | :--- | :--- | :--- |
-| **Cryptographic Integrity Suite** | `node test/crypto.test.js` | ✅ **PASS (100%)** |
-| **Client Production Bundle** | `npm run build` in `client/` | ✅ **PASS (2.05s)** |
+| **Cryptographic Integrity Suite** | `node test/crypto.test.js` | ✅ **PASS (100% - 5/5 Pipelines)** |
+| **Client Production Bundle** | `npm run build` in `client/` | ✅ **PASS (1.06s)** |
 | **Server Public Sync** | `Copy-Item client/dist/* server/public/` | ✅ **SYNCED** |
 | **Capacitor Android Assets** | `npx cap copy` in `client/` | ✅ **SYNCED** |
-| **Remote Repository** | `git push origin main` | ✅ **UP TO DATE** |
+| **Remote Repository** | `git push origin main` | ✅ **STAGED FOR PUSH** |
 
 ---
 
 ## 3. Future Roadmap & Enhancement Backlog
 
-### Phase 10: Multi-Device Ratchet Synchronization
-- [ ] Implement Session multi-device keys: Pair secondary devices (desktop/tablet) via encrypted QR code handshake.
-- [ ] Replicate ratchet state securely between linked devices without passing master identity keys through the server.
-
-### Phase 11: Post-Quantum Group Ratchets (MLS / TreeKEM)
+### Phase 10: Post-Quantum Group Ratchets (MLS / TreeKEM)
 - [ ] Replace pairwise group fan-out with IETF Messaging Layer Security (MLS) using post-quantum TreeKEM.
 - [ ] Reduce group message encryption complexity from $\mathcal{O}(N)$ to $\mathcal{O}(\log N)$.
 
-### Phase 12: Decentralized & Onion Routing
+### Phase 11: Decentralized & Onion Routing
 - [ ] Optional Tor Hidden Service (`.onion`) WebSocket transport natively integrated via Tor SOCKS5 proxy.
 - [ ] Federation between self-hosted relay instances using gossip protocols.

@@ -4,6 +4,7 @@ import { computeInitiatorSession, computeReceiverSession } from '../src/crypto/h
 import { DoubleRatchet } from '../src/crypto/ratchet.js';
 import { sealMessage, unsealMessage } from '../src/crypto/sealedSender.js';
 import { bytesToBase64, base64ToBytes } from '../src/crypto/utils.js';
+import { generateDeviceLinkSession, encryptDeviceLinkPayload, decryptDeviceLinkPayload } from '../src/crypto/deviceLink.js';
 
 console.log('═══════════════════════════════════════════════════');
 console.log(' PROJECT VEIL — CRYPTOGRAPHIC INTEGRITY TEST SUITE');
@@ -124,8 +125,45 @@ async function runTests() {
   if (!tamperCaught) throw new Error("CRITICAL: Tampered header was NOT rejected by AES-GCM AAD!");
   console.log('[4] Header AAD Tamper Rejection (MitM Deflection): ✅ PASS');
 
+  // Test 5: Multi-Device Sync Ephemeral Key Exchange & E2EE Vault Transfer
+  const secondarySession = generateDeviceLinkSession();
+  const identityBundle = {
+    cipherId: aliceId,
+    nickname: 'Alice Node',
+    identityX25519Pub: bytesToBase64(aliceXPub),
+    identityX25519Priv: bytesToBase64(aliceXPriv)
+  };
+
+  const encryptedLink = await encryptDeviceLinkPayload(secondarySession.ephemeralPubB64, identityBundle);
+  const decryptedBundle = await decryptDeviceLinkPayload(
+    secondarySession.ephemeralPrivB64,
+    encryptedLink.ephemeralPubB64,
+    encryptedLink.ciphertextB64,
+    encryptedLink.ivB64
+  );
+
+  if (decryptedBundle.cipherId !== aliceId || decryptedBundle.identityX25519Priv !== identityBundle.identityX25519Priv) {
+    throw new Error("Multi-device sync payload decryption mismatch!");
+  }
+
+  // Verify tamper rejection on link ciphertext
+  let linkTamperCaught = false;
+  try {
+    const corruptedCt = encryptedLink.ciphertextB64.slice(0, -4) + 'AAAA';
+    await decryptDeviceLinkPayload(
+      secondarySession.ephemeralPrivB64,
+      encryptedLink.ephemeralPubB64,
+      corruptedCt,
+      encryptedLink.ivB64
+    );
+  } catch (e) {
+    linkTamperCaught = true;
+  }
+  if (!linkTamperCaught) throw new Error("CRITICAL: Tampered device link ciphertext was NOT rejected!");
+  console.log('[5] Multi-Device Ephemeral E2EE Link & Tamper Shield: ✅ PASS');
+
   console.log('\n═══════════════════════════════════════════════════');
-  console.log(' ✅ ALL 4 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
+  console.log(' ✅ ALL 5 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
   console.log('═══════════════════════════════════════════════════\n');
 }
 

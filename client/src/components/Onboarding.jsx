@@ -1,14 +1,16 @@
 import { useState, useMemo } from 'react';
 import { generateCipherId, generateLongTermKeys } from '../crypto/identity';
 import { wrapAndStoreKeys } from '../crypto/keyStorage';
-import { ShieldCheck, Copy } from 'lucide-react';
+import { ShieldCheck, Copy, Laptop } from 'lucide-react';
 import { Clipboard } from '@capacitor/clipboard';
+import LinkedDevicesModal from './LinkedDevicesModal';
 
 export default function Onboarding({ onComplete }) {
   const [step, setStep] = useState(1);
   const [passphrase, setPassphrase] = useState('');
   const [nickname, setNickname] = useState('');
   const [copied, setCopied] = useState(false);
+  const [showLinkModal, setShowLinkModal] = useState(false);
 
   // Generate once on mount, never regenerate
   const { cipherId, keys } = useMemo(() => ({
@@ -98,7 +100,34 @@ export default function Onboarding({ onComplete }) {
             <div className="absolute inset-0 bg-gradient-to-r from-transparent via-arc-cyan/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-in-out"></div>
             ENGAGE PROTOCOL
           </button>
+
+          <div className="relative flex items-center justify-center my-1">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-arc-cyan/20"></div></div>
+            <span className="relative bg-stark-surface px-3 text-[10px] font-mono text-arc-cyan/50 uppercase tracking-widest">OR</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowLinkModal(true)}
+            className="w-full p-3 border border-arc-cyan/30 hover:border-arc-cyan bg-arc-cyan/5 hover:bg-arc-cyan/15 text-arc-cyan text-xs font-hud tracking-widest flex items-center justify-center gap-2 transition-all shadow-sm"
+          >
+            <Laptop size={15} />
+            LINK TO EXISTING ACCOUNT (QR)
+          </button>
         </div>
+      )}
+
+      {showLinkModal && (
+        <LinkedDevicesModal
+          myId=""
+          keys={null}
+          appMode="bunker"
+          onClose={() => setShowLinkModal(false)}
+          onDeviceLinkedSuccess={(linkedBundle) => {
+            setShowLinkModal(false);
+            onComplete(linkedBundle);
+          }}
+        />
       )}
 
       {step === 2 && (

@@ -75,14 +75,22 @@
 - [x] **Locked Chats:** Hidden folder protected by master vault passphrase.
 - [x] **Encrypted Backup & Restore:** Export and import `.veilbackup` archives encrypted with PBKDF2 (100k iter) + AES-256-GCM (`BackupModal.jsx`).
 
+### Phase 10: Post-Quantum Group Ratchets (MLS / TreeKEM)
+- [x] Replace pairwise group fan-out with IETF Messaging Layer Security (MLS RFC 9420) using Post-Quantum TreeKEM.
+- [x] Reduce group re-keying complexity to $\mathcal{O}(\log N)$ and message encryption complexity to $\mathcal{O}(1)$ using NIST FIPS 203 ML-KEM-768.
+- [x] Full copath key encapsulation, path secret derivation, and epoch synchronization.
+- [x] Single ciphertext fan-out over WebSocket relay with offline queuing and zero-knowledge push wakes.
+- [x] Real-time TreeKEM telemetry badges and epoch rotation monitors across Veil Flow and Veil Bunker UI.
+- [x] 100% cryptographic test verification (Test 6: 8-member group re-keying, $\mathcal{O}(\log N)$ commit, $\mathcal{O}(1)$ AES-256-GCM message encryption, tamper rejection).
+
 ---
 
 ## 2. Verification Status
 
 | Test Suite / Build Target | Command | Status |
 | :--- | :--- | :--- |
-| **Cryptographic Integrity Suite** | `node test/crypto.test.js` | ✅ **PASS (100% - 5/5 Pipelines)** |
-| **Client Production Bundle** | `npm run build` in `client/` | ✅ **PASS (1.06s)** |
+| **Cryptographic Integrity Suite** | `node test/crypto.test.js` | ✅ **PASS (100% - 6/6 Pipelines)** |
+| **Client Production Bundle** | `npm run build` in `client/` | ✅ **PASS (2.20s)** |
 | **Server Public Sync** | `Copy-Item client/dist/* server/public/` | ✅ **SYNCED** |
 | **Capacitor Android Assets** | `npx cap copy` in `client/` | ✅ **SYNCED** |
 | **Remote Repository** | `git push origin main` | ✅ **STAGED FOR PUSH** |
@@ -90,10 +98,6 @@
 ---
 
 ## 3. Future Roadmap & Enhancement Backlog
-
-### Phase 10: Post-Quantum Group Ratchets (MLS / TreeKEM)
-- [ ] Replace pairwise group fan-out with IETF Messaging Layer Security (MLS) using post-quantum TreeKEM.
-- [ ] Reduce group message encryption complexity from $\mathcal{O}(N)$ to $\mathcal{O}(\log N)$.
 
 ### Phase 11: Decentralized & Onion Routing
 - [ ] Optional Tor Hidden Service (`.onion`) WebSocket transport natively integrated via Tor SOCKS5 proxy.

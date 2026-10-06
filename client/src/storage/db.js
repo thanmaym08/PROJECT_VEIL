@@ -176,6 +176,19 @@ export async function getGroup(groupId) {
   });
 }
 
+export async function saveGroupTree(groupId, treeData) {
+  const group = await getGroup(groupId);
+  if (group) {
+    group.treeKemData = treeData;
+    await saveGroup(group);
+  }
+}
+
+export async function getGroupTree(groupId) {
+  const group = await getGroup(groupId);
+  return group ? group.treeKemData || null : null;
+}
+
 export async function getContacts() {
   const db = await getDB();
   return new Promise((resolve) => {

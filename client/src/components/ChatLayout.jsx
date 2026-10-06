@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, updateMessageFields, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup, getAllStarredMessages } from '../storage/db';
+import { getContacts, saveContact, saveMessage, getMessages, updateMessageStatus, updateMessageReactions, updateMessageFields, deleteMessage, getLocalPreKeys, saveLocalPreKeys, getGroups, saveGroup, deleteGroup, getGroup, getAllStarredMessages, saveGroupTree, getGroupTree } from '../storage/db';
 import { generatePreKeyBundle, generateOneTimePreKeys, verifyPreKeyBundle } from '../crypto/prekeys';
 import { UserPlus, ShieldAlert, ShieldCheck, Send, Check, CheckCheck, Paperclip, Image, FileText, Download, X, Maximize2, Loader2, Smile, CornerUpLeft, Users, Link, Share2, Plus, MessageSquare, Info, LogOut, Mic, MicOff, Square, Play, Pause, Search, Trash2, Flame, Lock, Unlock, Zap, Radio, Phone, Video, Star, Pin, BarChart2, Camera, Edit3, Eye, EyeOff, Palette, Database, AtSign, Laptop } from 'lucide-react';
 import AddContactModal from './AddContactModal';
@@ -26,6 +26,7 @@ import { DoubleRatchet } from '../crypto/ratchet';
 import { base64ToBytes, bytesToBase64, utf8ToBytes } from '../crypto/utils';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { encryptAttachment, uploadEncryptedAttachment, downloadEncryptedAttachment, decryptAttachment, revokeAttachmentUrl } from '../crypto/mediaCipher';
+import { createGroupTree, initMemberFromInitialCommit, createTreeKemCommit, processTreeKemCommit, encryptGroupMlsMessage, decryptGroupMlsMessage, serializeGroupTree, deserializeGroupTree } from '../crypto/treeKem';
 import { Capacitor } from '@capacitor/core';
 
 const EMOJI_LIST = ['👍', '❤️', '🔥', '😂', '😮', '👏'];
@@ -371,6 +372,28 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
   const pendingBundleRequests = useRef({});
   const serverIdentityPubRef = useRef(null);
   const mySenderCertRef = useRef(null);
+  
+  // Post-Quantum MLS TreeKEM State
+  const groupTreesRef = useRef({}); // groupId -> GroupTree object
+  const [groupTreesEpoch, setGroupTreesEpoch] = useState({}); // groupId -> epoch number
+
+  const getOrLoadGroupTree = async (groupId) => {
+    if (groupTreesRef.current[groupId]) {
+      return groupTreesRef.current[groupId];
+    }
+    try {
+      const storedJson = await getGroupTree(groupId);
+      if (storedJson) {
+        const tree = deserializeGroupTree(storedJson);
+        groupTreesRef.current[groupId] = tree;
+        setGroupTreesEpoch(prev => ({ ...prev, [groupId]: tree.epoch }));
+        return tree;
+      }
+    } catch (err) {
+      console.warn(`[VEIL] Failed to load TreeKEM state for ${groupId}:`, err);
+    }
+    return null;
+  };
 
   // Mobile Resilience refs
   const reconnectAttemptRef = useRef(0);
@@ -475,6 +498,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       activeContactRef.current = null;
       setActiveContact(null);
       getMessages(activeGroup.id).then(setMessages);
+      getOrLoadGroupTree(activeGroup.id);
     }
   }, [activeGroup]);
 
@@ -697,15 +721,24 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
   const handleCreateGroup = async (groupName, selectedMembers) => {
     const groupId = 'group-' + Math.random().toString(36).slice(2, 9) + '-' + Date.now();
     const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+    const allMembers = [
+      { id: myId, name: myDisplayName, role: 'admin' },
+      ...selectedMembers
+    ];
+
+    // Initialize Post-Quantum MLS TreeKEM Group Tree
+    const { groupTree, initialCommit } = createGroupTree(groupId, allMembers, myId);
+    groupTreesRef.current[groupId] = groupTree;
+    setGroupTreesEpoch(prev => ({ ...prev, [groupId]: groupTree.epoch }));
+    const serializedTree = serializeGroupTree(groupTree);
+
     const newGroup = {
       id: groupId,
       name: groupName,
       createdBy: myId,
       createdAt: Date.now(),
-      members: [
-        { id: myId, name: myDisplayName, role: 'admin' },
-        ...selectedMembers
-      ]
+      members: allMembers,
+      treeKemData: serializedTree
     };
 
     await saveGroup(newGroup);
@@ -714,7 +747,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
     setGroups(updated);
     setShowCreateGroup(false);
 
-    // Notify selected members
+    // Notify selected members with initial TreeKEM commit
     const initPayload = {
       type: 'group_event',
       action: 'create',
@@ -723,7 +756,8 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       members: newGroup.members,
       senderId: myId,
       senderName: myDisplayName,
-      text: `Created group "${groupName}"`
+      text: `Created group "${groupName}"`,
+      initialCommit
     };
 
     for (const member of selectedMembers) {
@@ -737,7 +771,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
     setActiveContact(null);
     setActiveGroup(newGroup);
-    showToast(`Encrypted group "${groupName}" created!`);
+    showToast(`Encrypted group "${groupName}" created (MLS TreeKEM active)!`);
   };
 
   const handleAddMembersToGroup = async (groupId, newMembers) => {
@@ -746,11 +780,34 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
     const existingIds = new Set((group.members || []).map(m => m.id));
     const merged = [...(group.members || [])];
+    const actualNew = [];
     newMembers.forEach(m => {
-      if (!existingIds.has(m.id)) merged.push(m);
+      if (!existingIds.has(m.id)) {
+        merged.push(m);
+        actualNew.push(m);
+      }
     });
 
-    const updatedGroup = { ...group, members: merged };
+    let groupTree = await getOrLoadGroupTree(groupId);
+    let commitPayload = null;
+    if (!groupTree) {
+      const initRes = createGroupTree(groupId, merged, myId);
+      groupTree = initRes.groupTree;
+      groupTreesRef.current[groupId] = groupTree;
+      setGroupTreesEpoch(prev => ({ ...prev, [groupId]: groupTree.epoch }));
+      await saveGroupTree(groupId, serializeGroupTree(groupTree));
+    }
+
+    if (groupTree && actualNew.length > 0) {
+      const commitRes = createTreeKemCommit(groupTree, myId, { addedMembers: actualNew });
+      groupTree = commitRes.newGroupTree;
+      commitPayload = commitRes.commitPayload;
+      groupTreesRef.current[groupId] = groupTree;
+      setGroupTreesEpoch(prev => ({ ...prev, [groupId]: groupTree.epoch }));
+      await saveGroupTree(groupId, serializeGroupTree(groupTree));
+    }
+
+    const updatedGroup = { ...group, members: merged, treeKemData: groupTree ? serializeGroupTree(groupTree) : group.treeKemData };
     await saveGroup(updatedGroup);
     const allGroups = await getGroups();
     groupsRef.current = allGroups;
@@ -769,6 +826,21 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       text: `Added ${newMembers.map(m => m.name).join(', ')} to the group`
     };
 
+    // Broadcast O(log N) Commit to all members
+    if (commitPayload) {
+      const commitMsg = {
+        type: 'group_commit',
+        groupId,
+        commitPayload,
+        recipients: merged.map(m => m.id)
+      };
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify(commitMsg));
+      } else {
+        await saveToOutbox(commitMsg);
+      }
+    }
+
     for (const member of merged.filter(m => m.id !== myId)) {
       try {
         const target = contacts.find(c => c.id === member.id) || member;
@@ -776,7 +848,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
       } catch (e) {}
     }
 
-    showToast(`Added ${newMembers.length} friend${newMembers.length > 1 ? 's' : ''} to group!`);
+    showToast(`Added ${newMembers.length} friend${newMembers.length > 1 ? 's' : ''} to group (Epoch #${groupTree?.epoch || 1})!`);
   };
 
   const handleAddFriendFromGroup = async (member) => {
@@ -1169,6 +1241,83 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
         });
       } else if (data.type === 'sealed_msg') {
         handleIncomingMessage(data, true);
+      } else if (data.type === 'group_mls_msg') {
+        try {
+          const { groupId, epoch, senderId, seq } = data;
+          let tree = await getOrLoadGroupTree(groupId);
+          if (!tree) {
+            console.warn(`[VEIL] TreeKEM state missing for group ${groupId}`);
+            return;
+          }
+          const decryptedPayload = await decryptGroupMlsMessage(tree, data);
+          await saveGroupTree(groupId, serializeGroupTree(tree));
+
+          if (decryptedPayload.attachment) {
+            loadAttachment(decryptedPayload.attachment);
+          }
+
+          const gId = groupId;
+          let g = await getGroup(gId);
+          const myDisplayName = localStorage.getItem('veil_my_name') || `Agent-${myId.slice(0, 4)}`;
+          const senderDisplayName = decryptedPayload.senderName || `Member-${senderId.slice(0, 4)}`;
+
+          const groupMsgObj = {
+            contactId: gId,
+            groupId: gId,
+            fromMe: false,
+            senderId,
+            senderName: senderDisplayName,
+            senderX25519Pub: decryptedPayload.senderX25519Pub || null,
+            senderEd25519Pub: decryptedPayload.senderEd25519Pub || null,
+            text: decryptedPayload.text || '',
+            attachment: decryptedPayload.attachment,
+            replyTo: decryptedPayload.replyTo || undefined,
+            poll: decryptedPayload.poll || undefined,
+            viewOnce: (decryptedPayload.attachment?.viewOnce || decryptedPayload.viewOnce) || undefined,
+            forwarded: decryptedPayload.forwarded || undefined,
+            reactions: {},
+            ts: seq || Date.now(),
+            seq: seq || Date.now(),
+            ttl: decryptedPayload.ttl || 0,
+            mlsEpoch: epoch
+          };
+          await saveMessage(groupMsgObj);
+
+          if (activeGroupRef.current && activeGroupRef.current.id === gId) {
+            setMessages(prev => [...prev, groupMsgObj]);
+            setTypingUsers(prev => ({ ...prev, [senderId]: false }));
+          } else {
+            showToast(`New message in ${g?.name || 'Group'}: ${senderDisplayName}`);
+          }
+        } catch (err) {
+          console.error("[VEIL] Failed to decrypt incoming TreeKEM MLS group message:", err);
+        }
+      } else if (data.type === 'group_commit') {
+        try {
+          const { groupId, commitPayload } = data;
+          let tree = await getOrLoadGroupTree(groupId);
+          if (tree) {
+            const updatedTree = processTreeKemCommit(tree, myId, commitPayload);
+            groupTreesRef.current[groupId] = updatedTree;
+            setGroupTreesEpoch(prev => ({ ...prev, [groupId]: updatedTree.epoch }));
+            await saveGroupTree(groupId, serializeGroupTree(updatedTree));
+
+            if (commitPayload.roster) {
+              const g = await getGroup(groupId);
+              if (g) {
+                g.members = commitPayload.roster;
+                await saveGroup(g);
+                const allG = await getGroups();
+                groupsRef.current = allG;
+                setGroups(allG);
+                if (activeGroupRef.current?.id === groupId) setActiveGroup(g);
+              }
+            }
+            showToast(`Group key rotated to Epoch #${updatedTree.epoch} (ML-KEM-768)`);
+          }
+        } catch (err) {
+          console.error("[VEIL] Failed to process incoming group_commit:", err);
+        }
       }
     };
   };
@@ -1372,6 +1521,17 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 });
                 g.members = merged;
               }
+              if (payload.initialCommit && !groupTreesRef.current[payload.groupId]) {
+                try {
+                  const tree = initMemberFromInitialCommit(payload.initialCommit, myId);
+                  groupTreesRef.current[payload.groupId] = tree;
+                  setGroupTreesEpoch(prev => ({ ...prev, [payload.groupId]: tree.epoch }));
+                  await saveGroupTree(payload.groupId, serializeGroupTree(tree));
+                  if (g) g.treeKemData = serializeGroupTree(tree);
+                } catch (err) {
+                  console.warn(`[VEIL] Failed to init member from initialCommit:`, err);
+                }
+              }
               await saveGroup(g);
               const allG = await getGroups();
               groupsRef.current = allG;
@@ -1574,16 +1734,41 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           senderEd25519Pub: keys.ed25519.publicKeyB64,
           text: text,
           attachment: attachmentMetadata || undefined,
-          replyTo: replyPayload
+          replyTo: replyPayload,
+          viewOnce: attachmentMetadata?.viewOnce || undefined,
+          ttl
         };
 
-        const otherMembers = (group.members || []).filter(m => m.id !== myId);
-        for (const member of otherMembers) {
-          try {
-            const target = contacts.find(c => c.id === member.id) || member;
-            await encryptAndSendToPeer(target, innerPayload, ttl);
-          } catch (err) {
-            console.warn(`[VEIL] Fan-out error to ${member.name}:`, err);
+        let tree = await getOrLoadGroupTree(group.id);
+        if (!tree && group.members && group.members.length > 0) {
+          const initRes = createGroupTree(group.id, group.members, myId);
+          tree = initRes.groupTree;
+          groupTreesRef.current[group.id] = tree;
+          setGroupTreesEpoch(prev => ({ ...prev, [group.id]: tree.epoch }));
+          await saveGroupTree(group.id, serializeGroupTree(tree));
+        }
+
+        if (tree) {
+          // O(1) TreeKEM MLS Group Transmission!
+          const mlsEnvelope = await encryptGroupMlsMessage(tree, myId, innerPayload);
+          await saveGroupTree(group.id, serializeGroupTree(tree));
+          setGroupTreesEpoch(prev => ({ ...prev, [group.id]: tree.epoch }));
+
+          if (ws.current?.readyState === WebSocket.OPEN) {
+            ws.current.send(JSON.stringify(mlsEnvelope));
+          } else {
+            await saveToOutbox(mlsEnvelope);
+          }
+        } else {
+          // Fallback to pairwise fan-out
+          const otherMembers = (group.members || []).filter(m => m.id !== myId);
+          for (const member of otherMembers) {
+            try {
+              const target = contacts.find(c => c.id === member.id) || member;
+              await encryptAndSendToPeer(target, innerPayload, ttl);
+            } catch (err) {
+              console.warn(`[VEIL] Fan-out error to ${member.name}:`, err);
+            }
           }
         }
 
@@ -1601,7 +1786,8 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           ts,
           seq,
           status: 'delivered',
-          ttl
+          ttl,
+          mlsEpoch: tree ? tree.epoch : undefined
         };
         await saveMessage(msgObj);
         setMessages(prev => [...prev, msgObj]);
@@ -2855,18 +3041,25 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     <Users size={18} />
                   </div>
                   <div>
-                    <div className={`font-bold text-base md:text-lg flex items-center gap-2 ${
+                    <div className={`font-bold text-base md:text-lg flex items-center gap-2 flex-wrap ${
                       isFlow ? 'text-white font-sans' : 'font-hud tracking-widest text-white'
                     }`}>
                       <span>{activeGroup.name}</span>
-                      <span className={`text-[9px] px-1.5 py-0.2 rounded uppercase ${
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-semibold flex items-center gap-1 ${
                         isFlow ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/30' : 'font-mono text-arc-cyan border border-arc-cyan/30'
-                      }`}>E2EE GROUP</span>
+                      }`}>
+                        <Lock size={10} /> MLS TREEKEM
+                      </span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                        isFlow ? 'bg-[#202c33] text-[#8696a0] border border-white/10' : 'text-arc-cyan/80 bg-arc-cyan/10 border border-arc-cyan/20'
+                      }`}>
+                        EPOCH #{groupTreesEpoch[activeGroup.id] || 1} • ML-KEM-768
+                      </span>
                     </div>
                     <div className={`text-[11px] mt-0.5 ${
                       isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/70 font-mono'
                     }`}>
-                      {activeGroup.members?.length || 1} PARTICIPANTS • ZERO-KNOWLEDGE
+                      {activeGroup.members?.length || 1} PARTICIPANTS • O(log N) RE-KEYING • ZERO-KNOWLEDGE
                     </div>
                   </div>
                 </div>
@@ -4014,6 +4207,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           group={activeGroup} 
           contacts={contacts} 
           myId={myId}
+          treeEpoch={groupTreesEpoch[activeGroup.id] || 1}
           onClose={() => setShowGroupInfo(false)}
           onAddMembers={handleAddMembersToGroup}
           onAddFriendFromGroup={handleAddFriendFromGroup}

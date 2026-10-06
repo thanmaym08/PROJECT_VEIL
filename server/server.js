@@ -715,6 +715,60 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      case 'group_mls_msg': {
+        const { groupId, epoch, senderId, seq, recipients } = data;
+        const authSender = connectionMap.get(ws);
+        if (!authSender || authSender !== senderId || !Array.isArray(recipients)) {
+          console.warn(`[SECURITY] Blocked unauthenticated/spoofed group_mls_msg from socket`);
+          return;
+        }
+
+        // Fan-out single O(1) ciphertext to all group recipients
+        for (const recipientId of recipients) {
+          if (recipientId === senderId) continue;
+          const target = identities.get(recipientId);
+          if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
+            target.ws.send(JSON.stringify(data));
+          } else {
+            // Queue offline if not connected
+            if (!offlineQueues.has(recipientId)) offlineQueues.set(recipientId, []);
+            offlineQueues.get(recipientId).push({ queuedAt: Date.now(), envelope: data });
+            if (offlineQueues.get(recipientId).length > MAX_QUEUE_SIZE) {
+              offlineQueues.get(recipientId).shift();
+            }
+            sendPrivacyMaskedPush(recipientId, 'message');
+          }
+        }
+
+        // Send delivery ack back to sender
+        if (ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ type: 'ack', to: groupId, seq, status: 'delivered' }));
+        }
+        break;
+      }
+
+      case 'group_commit': {
+        const { groupId, commitPayload, recipients } = data;
+        const senderId = connectionMap.get(ws);
+        if (!senderId || !commitPayload || !Array.isArray(recipients)) return;
+
+        for (const recipientId of recipients) {
+          if (recipientId === senderId) continue;
+          const target = identities.get(recipientId);
+          if (target && target.ws !== null && target.ws.readyState === ws.OPEN) {
+            target.ws.send(JSON.stringify(data));
+          } else {
+            if (!offlineQueues.has(recipientId)) offlineQueues.set(recipientId, []);
+            offlineQueues.get(recipientId).push({ queuedAt: Date.now(), envelope: data });
+            if (offlineQueues.get(recipientId).length > MAX_QUEUE_SIZE) {
+              offlineQueues.get(recipientId).shift();
+            }
+            sendPrivacyMaskedPush(recipientId, 'message');
+          }
+        }
+        break;
+      }
+
       case 'typing':
       case 'read':
       case 'vanish_mode':

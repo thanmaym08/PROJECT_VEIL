@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { X, Users, Copy, Check, UserPlus, MessageSquare, LogOut, ShieldCheck, Share2 } from 'lucide-react';
+import { X, Users, Copy, Check, UserPlus, MessageSquare, LogOut, ShieldCheck, Share2, Lock, Zap } from 'lucide-react';
 
 export default function GroupInfoModal({ 
   group, 
   contacts, 
   myId, 
+  treeEpoch = 1,
   onClose, 
   onAddMembers, 
   onAddFriendFromGroup, 
@@ -82,12 +83,42 @@ export default function GroupInfoModal({
           <div className="flex-1 min-w-0">
             <h2 className="font-hud font-bold tracking-[0.2em] text-lg text-white truncate">{group.name}</h2>
             <div className="text-[10px] font-mono text-arc-cyan/70 tracking-wider">
-              {group.members?.length || 1} PARTICIPANTS // E2EE DOUBLE RATCHET
+              {group.members?.length || 1} PARTICIPANTS // MLS TREEKEM • EPOCH #{treeEpoch}
             </div>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-4 pr-1 custom-scrollbar">
+          {/* Post-Quantum TreeKEM MLS Cryptography Status */}
+          <div className="bg-arc-cyan/5 border border-arc-cyan/30 p-3.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-hud tracking-widest text-arc-cyan uppercase flex items-center gap-1.5 font-bold">
+                <Lock size={12} className="text-arc-cyan" /> Post-Quantum TreeKEM MLS
+              </span>
+              <span className="text-[9px] font-mono px-1.5 py-0.5 bg-arc-cyan/20 border border-arc-cyan/40 text-arc-cyan rounded">
+                EPOCH #{treeEpoch}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+              <div className="bg-black/40 p-2 border border-arc-cyan/15">
+                <div className="text-gray-400 text-[9px] uppercase">Node KEM</div>
+                <div className="text-arc-cyan font-bold">FIPS 203 ML-KEM-768</div>
+              </div>
+              <div className="bg-black/40 p-2 border border-arc-cyan/15">
+                <div className="text-gray-400 text-[9px] uppercase">Group Ratchet</div>
+                <div className="text-stark-emerald font-bold">TreeKEM O(log N)</div>
+              </div>
+              <div className="bg-black/40 p-2 border border-arc-cyan/15">
+                <div className="text-gray-400 text-[9px] uppercase">Fan-out Overhead</div>
+                <div className="text-white font-bold">O(1) Single Ciphertext</div>
+              </div>
+              <div className="bg-black/40 p-2 border border-arc-cyan/15">
+                <div className="text-gray-400 text-[9px] uppercase">Post-Compromise</div>
+                <div className="text-stark-emerald font-bold">Active PCS / FS</div>
+              </div>
+            </div>
+          </div>
+
           {/* Shareable Invite Link Box */}
           <div className="bg-stark-bg/70 border border-arc-cyan/30 p-3.5 rounded-none">
             <div className="flex items-center justify-between mb-1.5">

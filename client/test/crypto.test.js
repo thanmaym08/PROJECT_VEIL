@@ -5,6 +5,7 @@ import { DoubleRatchet } from '../src/crypto/ratchet.js';
 import { sealMessage, unsealMessage } from '../src/crypto/sealedSender.js';
 import { bytesToBase64, base64ToBytes } from '../src/crypto/utils.js';
 import { generateDeviceLinkSession, encryptDeviceLinkPayload, decryptDeviceLinkPayload } from '../src/crypto/deviceLink.js';
+import { createGroupTree, initMemberFromInitialCommit, createTreeKemCommit, processTreeKemCommit, encryptGroupMlsMessage, decryptGroupMlsMessage } from '../src/crypto/treeKem.js';
 
 console.log('═══════════════════════════════════════════════════');
 console.log(' PROJECT VEIL — CRYPTOGRAPHIC INTEGRITY TEST SUITE');
@@ -162,8 +163,79 @@ async function runTests() {
   if (!linkTamperCaught) throw new Error("CRITICAL: Tampered device link ciphertext was NOT rejected!");
   console.log('[5] Multi-Device Ephemeral E2EE Link & Tamper Shield: ✅ PASS');
 
+  // Test 6: Post-Quantum Group Ratchets (MLS / TreeKEM with ML-KEM-768)
+  const groupMembers = Array.from({ length: 8 }, (_, i) => ({
+    id: 'agent_' + i,
+    name: 'Agent ' + i
+  }));
+
+  // 1. Creator (agent_0) creates TreeKEM tree
+  const { groupTree: creatorTree, initialCommit } = createGroupTree('quantum_group_omega', groupMembers, 'agent_0');
+  
+  // 2. Members initialize trees from initial commit
+  const memberTrees = groupMembers.map(m => {
+    if (m.id === 'agent_0') return creatorTree;
+    return initMemberFromInitialCommit(initialCommit, m.id);
+  });
+
+  // Verify all 8 members share identical Epoch 1 secret
+  for (let i = 1; i < memberTrees.length; i++) {
+    if (bytesToBase64(memberTrees[i].epochSecret) !== bytesToBase64(creatorTree.epochSecret)) {
+      throw new Error(`Epoch 1 secret mismatch for ${memberTrees[i].myId}`);
+    }
+  }
+
+  // 3. Member 3 performs a TreeKEM Commit (Epoch 1 -> Epoch 2) in O(log N)
+  const { newGroupTree: committerTree2, commitPayload: commit2 } = createTreeKemCommit(memberTrees[3], 'agent_3');
+  memberTrees[3] = committerTree2;
+
+  // 4. All other 7 members process commit2
+  for (let i = 0; i < memberTrees.length; i++) {
+    if (i === 3) continue;
+    memberTrees[i] = processTreeKemCommit(memberTrees[i], memberTrees[i].myId, commit2);
+    if (bytesToBase64(memberTrees[i].epochSecret) !== bytesToBase64(committerTree2.epochSecret)) {
+      throw new Error(`Epoch 2 secret mismatch for member ${memberTrees[i].myId}`);
+    }
+  }
+
+  // 5. Member 5 sends an O(1) encrypted group message
+  const secretPayload = { text: "Tactical post-quantum transmission to entire squad", code: 9942 };
+  const mlsMsg = await encryptGroupMlsMessage(memberTrees[5], 'agent_5', secretPayload);
+
+  // 6. Member 1 and Member 7 decrypt the message in O(1)
+  const decrypted1 = await decryptGroupMlsMessage(memberTrees[1], mlsMsg);
+  const decrypted7 = await decryptGroupMlsMessage(memberTrees[7], mlsMsg);
+
+  if (decrypted1.text !== secretPayload.text || decrypted7.code !== secretPayload.code) {
+    throw new Error("TreeKEM group message decryption content mismatch!");
+  }
+
+  // 7. Tamper Rejection Test (Corrupted ciphertext or AAD must fail)
+  let mlsTamperCaught = false;
+  try {
+    const tamperedMlsMsg = { ...mlsMsg, ciphertextB64: mlsMsg.ciphertextB64.slice(0, -4) + 'AAAA' };
+    await decryptGroupMlsMessage(memberTrees[2], tamperedMlsMsg);
+  } catch (e) {
+    mlsTamperCaught = true;
+  }
+  if (!mlsTamperCaught) throw new Error("CRITICAL: Tampered TreeKEM MLS ciphertext was NOT rejected!");
+
+  // 8. Member 6 performs Epoch 3 commit with member update
+  const { newGroupTree: committerTree3, commitPayload: commit3 } = createTreeKemCommit(memberTrees[6], 'agent_6');
+  memberTrees[6] = committerTree3;
+
+  for (let i = 0; i < memberTrees.length; i++) {
+    if (i === 6) continue;
+    memberTrees[i] = processTreeKemCommit(memberTrees[i], memberTrees[i].myId, commit3);
+    if (bytesToBase64(memberTrees[i].epochSecret) !== bytesToBase64(committerTree3.epochSecret)) {
+      throw new Error(`Epoch 3 secret mismatch for member ${memberTrees[i].myId}`);
+    }
+  }
+
+  console.log('[6] Post-Quantum TreeKEM MLS (O(log N) Commit + O(1) Group AES-GCM): ✅ PASS');
+
   console.log('\n═══════════════════════════════════════════════════');
-  console.log(' ✅ ALL 5 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
+  console.log(' ✅ ALL 6 CRYPTOGRAPHIC PIPELINES VERIFIED 100%');
   console.log('═══════════════════════════════════════════════════\n');
 }
 

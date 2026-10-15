@@ -2384,7 +2384,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
     <div className={`flex-1 flex overflow-hidden p-2 md:p-4 gap-4 ${isFlow ? 'bg-[#111b21]' : ''}`}>
       {/* Sidebar */}
       <div 
-        className={`w-full md:w-80 flex-col transition-all duration-200 ${(activeContact || activeGroup) ? 'hidden md:flex' : 'flex'} ${
+        className={`w-full md:w-96 lg:w-[410px] flex-col transition-all duration-200 ${(activeContact || activeGroup) ? 'hidden md:flex' : 'flex'} ${
           isFlow 
             ? 'bg-[#111b21] border border-[#222e35] rounded-xl shadow-lg' 
             : 'bg-stark-surface border border-arc-cyan/20 shadow-glow-cyan'
@@ -2392,8 +2392,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
         style={!isFlow ? { clipPath: "polygon(0 0, 100% 0, 100% 100%, 5% 100%, 0 95%)" } : {}}
       >
         {/* App Header & Dual Mode Switcher */}
-        <div className={`p-3 border-b flex flex-col gap-2.5 ${isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-arc-cyan/5 border-arc-cyan/20'}`}>
-          <div className="flex justify-between items-center">
+        <div className={`p-3 md:p-3.5 border-b flex flex-col gap-3 ${isFlow ? 'bg-[#202c33] border-[#222e35]' : 'bg-arc-cyan/5 border-arc-cyan/20'}`}>
+          {/* Row 1: Mode Switcher & Security Controls */}
+          <div className="flex justify-between items-center gap-2">
             {/* Mode Switcher Segmented Control */}
             <div className={`flex items-center p-0.5 rounded-lg border ${
               isFlow ? 'bg-[#111b21] border-[#2a3942]' : 'bg-black/60 border-arc-cyan/30'
@@ -2401,148 +2402,159 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
               <button
                 type="button"
                 onClick={() => toggleAppMode('flow')}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-all ${
+                className={`px-3 py-1.5 rounded-md text-xs md:text-sm font-semibold flex items-center gap-1.5 transition-all ${
                   isFlow
                     ? 'bg-[#00a884] text-white shadow'
                     : 'text-gray-400 hover:text-white'
                 }`}
                 title="Veil Flow: WhatsApp-Style Secure Messenger"
               >
-                <MessageSquare size={13} />
+                <MessageSquare size={16} />
                 <span>Veil Flow</span>
               </button>
               <button
                 type="button"
                 onClick={() => toggleAppMode('bunker')}
-                className={`px-2.5 py-1 rounded-md text-xs font-hud font-bold tracking-wider flex items-center gap-1.5 transition-all ${
+                className={`px-3 py-1.5 rounded-md text-xs md:text-sm font-hud font-bold tracking-wider flex items-center gap-1.5 transition-all ${
                   !isFlow
                     ? 'bg-arc-cyan/20 text-arc-cyan border border-arc-cyan shadow-glow-cyan'
                     : 'text-gray-400 hover:text-white'
                 }`}
                 title="Veil Bunker: Zero-Trust Cyberpunk Quantum Fortress"
               >
-                <ShieldCheck size={13} />
+                <ShieldCheck size={16} />
                 <span>Bunker</span>
               </button>
             </div>
 
-            {/* Quick Actions (Panic Wipe + Lock) */}
-            <div className="flex items-center gap-1.5">
+            {/* Quick Security & Vault Actions */}
+            <div className="flex items-center gap-1">
               {!isFlow && (
                 <button
                   type="button"
                   onClick={() => setShowPanicModal(true)}
-                  className="px-2 py-1 bg-stark-crimson/20 hover:bg-stark-crimson/40 border border-stark-crimson text-stark-crimson hover:text-white rounded text-[10px] font-hud font-bold tracking-wider flex items-center gap-1 transition-all shadow-[0_0_8px_rgba(255,42,95,0.3)]"
+                  className="px-2.5 py-1 bg-stark-crimson/20 hover:bg-stark-crimson/40 border border-stark-crimson text-stark-crimson hover:text-white rounded text-xs font-hud font-bold tracking-wider flex items-center gap-1 transition-all shadow-[0_0_8px_rgba(255,42,95,0.3)]"
                   title="Zero-Forensic Emergency Kill-Switch"
                 >
-                  <Flame size={12} className="animate-pulse" />
-                  <span className="hidden sm:inline">PANIC</span>
+                  <Flame size={14} className="animate-pulse" />
+                  <span>PANIC</span>
                 </button>
               )}
               {onLock && (
                 <button
                   type="button"
                   onClick={onLock}
-                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                  className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
                   title="Lock Vault"
                 >
-                  <Lock size={15} />
+                  <Lock size={18} />
                 </button>
               )}
               <button 
                 onClick={() => setShowStarredMessages(true)} 
-                className={`p-1.5 rounded transition-colors ${
+                className={`p-2 rounded-lg transition-colors ${
                   isFlow 
                     ? 'text-gray-300 hover:text-amber-400 hover:bg-white/10' 
                     : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
                 }`}
                 title="Starred Messages"
               >
-                <Star size={16} />
+                <Star size={18} />
               </button>
               <button 
                 onClick={() => setShowWallpaperModal(true)} 
-                className={`p-1.5 rounded transition-colors ${
+                className={`p-2 rounded-lg transition-colors ${
                   isFlow 
                     ? 'text-gray-300 hover:text-white hover:bg-white/10' 
                     : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
                 }`}
                 title="Chat Wallpaper"
               >
-                <Palette size={16} />
-              </button>
-              <button 
-                onClick={() => setShowCreateBroadcast(true)} 
-                className={`p-1.5 rounded transition-colors ${
-                  isFlow 
-                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
-                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
-                }`}
-                title="New Broadcast List"
-              >
-                <Radio size={16} />
+                <Palette size={18} />
               </button>
               <button 
                 onClick={() => setShowBackupModal(true)} 
-                className={`p-1.5 rounded transition-colors ${
+                className={`p-2 rounded-lg transition-colors ${
                   isFlow 
                     ? 'text-gray-300 hover:text-white hover:bg-white/10' 
                     : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
                 }`}
                 title="Encrypted Backup & Restore"
               >
-                <Database size={16} />
-              </button>
-              <button 
-                onClick={() => setShowLinkedDevices(true)} 
-                className={`p-1.5 rounded transition-colors ${
-                  isFlow 
-                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
-                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
-                }`}
-                title="Linked Devices (Multi-Device Sync)"
-              >
-                <Laptop size={16} />
-              </button>
-              <button 
-                onClick={handleTogglePushNotifications} 
-                className={`p-1.5 rounded transition-colors ${
-                  pushEnabled 
-                    ? (isFlow ? 'text-emerald-400 bg-emerald-500/20' : 'text-arc-cyan bg-arc-cyan/20 border border-arc-cyan shadow-glow-cyan')
-                    : (isFlow ? 'text-gray-400 hover:text-white hover:bg-white/10' : 'text-arc-cyan/50 hover:bg-arc-cyan/10 border border-arc-cyan/20')
-                }`}
-                title={pushEnabled ? "Zero-Knowledge Push Wake: ACTIVE (Click to toggle)" : "Zero-Knowledge Push Wake: OFF (Click to enable)"}
-              >
-                <Zap size={16} className={pushEnabled ? "animate-pulse" : ""} />
-              </button>
-              <button 
-                onClick={() => setShowCreateGroup(true)} 
-                className={`p-1.5 rounded transition-colors flex items-center gap-0.5 ${
-                  isFlow 
-                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
-                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
-                }`}
-                title="Create Group"
-              >
-                <Users size={16} />
-                <Plus size={10} className="-ml-1" />
-              </button>
-              <button 
-                onClick={() => setShowAddContact(true)} 
-                className={`p-1.5 rounded transition-colors ${
-                  isFlow 
-                    ? 'text-gray-300 hover:text-white hover:bg-white/10' 
-                    : 'text-arc-cyan hover:bg-arc-cyan/20 border border-transparent hover:border-arc-cyan/30'
-                }`}
-                title="Add Contact / QR Scanner"
-              >
-                <UserPlus size={17} />
+                <Database size={18} />
               </button>
             </div>
           </div>
 
+          {/* Row 2: Prominent Action Bar (Add Friend, New Group, Linked Devices, Broadcast, Push) */}
+          <div className={`flex items-center justify-between p-1.5 rounded-lg border gap-1.5 ${
+            isFlow ? 'bg-[#111b21] border-[#2a3942]' : 'bg-black/50 border-arc-cyan/30'
+          }`}>
+            <button 
+              onClick={() => setShowAddContact(true)} 
+              className={`flex-1 py-1.5 px-2.5 rounded-md font-semibold text-xs md:text-sm flex items-center justify-center gap-1.5 transition-all ${
+                isFlow 
+                  ? 'bg-[#00a884] text-white hover:bg-[#02906f] shadow-sm' 
+                  : 'bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:bg-arc-cyan/30 shadow-glow-cyan font-hud'
+              }`}
+              title="Add New Friend / QR Scanner"
+            >
+              <UserPlus size={18} />
+              <span>+ Friend</span>
+            </button>
+
+            <button 
+              onClick={() => setShowCreateGroup(true)} 
+              className={`flex-1 py-1.5 px-2.5 rounded-md font-semibold text-xs md:text-sm flex items-center justify-center gap-1.5 transition-all ${
+                isFlow 
+                  ? 'bg-[#202c33] text-gray-200 hover:text-white hover:bg-[#2a3942] border border-white/10' 
+                  : 'bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan hover:bg-arc-cyan/20 font-hud'
+              }`}
+              title="Create New Encrypted Group"
+            >
+              <Users size={18} />
+              <span>+ Group</span>
+            </button>
+
+            <button 
+              onClick={() => setShowLinkedDevices(true)} 
+              className={`p-2 rounded-md transition-colors flex items-center justify-center ${
+                isFlow 
+                  ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                  : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+              }`}
+              title="Linked Devices (Multi-Device Sync)"
+            >
+              <Laptop size={19} />
+            </button>
+
+            <button 
+              onClick={() => setShowCreateBroadcast(true)} 
+              className={`p-2 rounded-md transition-colors flex items-center justify-center ${
+                isFlow 
+                  ? 'text-gray-300 hover:text-white hover:bg-white/10' 
+                  : 'text-arc-cyan hover:bg-arc-cyan/20 border border-arc-cyan/30'
+              }`}
+              title="New Broadcast List"
+            >
+              <Radio size={19} />
+            </button>
+
+            <button 
+              onClick={handleTogglePushNotifications} 
+              className={`p-2 rounded-md transition-colors flex items-center justify-center ${
+                pushEnabled 
+                  ? (isFlow ? 'text-emerald-400 bg-emerald-500/20' : 'text-arc-cyan bg-arc-cyan/20 border border-arc-cyan shadow-glow-cyan')
+                  : (isFlow ? 'text-gray-400 hover:text-white hover:bg-white/10' : 'text-arc-cyan/50 hover:bg-arc-cyan/10 border border-arc-cyan/20')
+              }`}
+              title={pushEnabled ? "Zero-Knowledge Push Wake: ACTIVE (Click to toggle)" : "Zero-Knowledge Push Wake: OFF (Click to enable)"}
+            >
+              <Zap size={19} className={pushEnabled ? "animate-pulse" : ""} />
+            </button>
+          </div>
+
           {/* Subtitle & Status */}
-          <div className="flex justify-between items-center text-[10px] font-mono">
+          <div className="flex justify-between items-center text-xs font-mono">
             <div 
               onClick={() => {
                 const current = localStorage.getItem('veil_relay_url') || getWsUrl();
@@ -2554,49 +2566,49 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 }
               }}
               title="Click to view/change Relay Server URL"
-              className={`flex items-center gap-1.5 cursor-pointer hover:underline ${
-                isFlow ? 'text-gray-400' : 'text-arc-cyan/70'
+              className={`flex items-center gap-1.5 cursor-pointer hover:underline font-medium ${
+                isFlow ? 'text-gray-300' : 'text-arc-cyan/80'
               }`}
             >
-              <div className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'connected' ? (isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan shadow-glow-cyan animate-pulse') : 'bg-stark-crimson'}`} />
+              <div className={`w-2 h-2 rounded-full ${wsStatus === 'connected' ? (isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan shadow-glow-cyan animate-pulse') : 'bg-stark-crimson'}`} />
               <span>{wsStatus === 'connected' ? (isFlow ? 'E2EE Relay Active' : 'ML-KEM-768 ENCRYPTED') : 'Offline (Configure)'}</span>
             </div>
-            <span className={isFlow ? 'text-gray-500' : 'text-arc-cyan/50'}>ID: {myId.slice(0, 8)}...</span>
+            <span className={isFlow ? 'text-gray-400 font-mono text-xs' : 'text-arc-cyan/60 font-mono text-xs'}>ID: {myId.slice(0, 8)}...</span>
           </div>
 
           {/* Contact Search Bar (WhatsApp style) */}
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all ${
+          <div className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border transition-all ${
             isFlow 
               ? 'bg-[#111b21] border-[#222e35] text-white focus-within:border-[#00a884]' 
               : 'bg-black/50 border-arc-cyan/20 text-arc-cyan focus-within:border-arc-cyan'
           }`}>
-            <Search size={14} className={isFlow ? 'text-gray-400' : 'text-arc-cyan/60'} />
+            <Search size={17} className={isFlow ? 'text-gray-400' : 'text-arc-cyan/60'} />
             <input
               type="text"
               value={sidebarFilter}
               onChange={(e) => setSidebarFilter(e.target.value)}
               placeholder={isFlow ? "Search or start new chat" : "FILTER CHANNELS..."}
-              className={`w-full bg-transparent text-xs outline-none ${
-                isFlow ? 'text-white placeholder:text-gray-500' : 'font-mono text-arc-cyan placeholder:text-arc-cyan/40'
+              className={`w-full bg-transparent text-sm outline-none ${
+                isFlow ? 'text-white placeholder:text-gray-400' : 'font-mono text-arc-cyan placeholder:text-arc-cyan/40'
               }`}
             />
             {sidebarFilter && (
-              <button type="button" onClick={() => setSidebarFilter('')} className="text-gray-400 hover:text-white">
-                <X size={13} />
+              <button type="button" onClick={() => setSidebarFilter('')} className="text-gray-400 hover:text-white p-0.5">
+                <X size={15} />
               </button>
             )}
           </div>
         </div>
         
         {/* Navigation Tabs: ALL / DIRECT / GROUPS / BROADCASTS */}
-        <div className={`flex border-b text-[10px] font-medium tracking-wide ${
+        <div className={`flex border-b text-xs md:text-sm font-semibold tracking-wide ${
           isFlow ? 'bg-[#111b21] border-[#222e35]' : 'border-arc-cyan/20 bg-black/40 font-hud tracking-wider'
         }`}>
           <button
             onClick={() => setActiveTab('all')}
-            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+            className={`flex-1 py-3 text-center border-b-2 transition-all ${
               activeTab === 'all'
-                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-bold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
@@ -2604,9 +2616,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           </button>
           <button
             onClick={() => setActiveTab('direct')}
-            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+            className={`flex-1 py-3 text-center border-b-2 transition-all ${
               activeTab === 'direct'
-                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-bold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
@@ -2614,9 +2626,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
           </button>
           <button
             onClick={() => setActiveTab('groups')}
-            className={`flex-1 py-2.5 text-center border-b-2 transition-all ${
+            className={`flex-1 py-3 text-center border-b-2 transition-all ${
               activeTab === 'groups'
-                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-semibold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
+                ? (isFlow ? 'border-[#00a884] text-[#00a884] font-bold bg-[#202c33]/40' : 'border-arc-cyan text-arc-cyan bg-arc-cyan/10 font-bold shadow-[inset_0_-2px_6px_rgba(0,240,255,0.3)]')
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-white/5'
             }`}
           >
@@ -2815,15 +2827,15 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 {(activeTab === 'all' || activeTab === 'groups') && displayGroups.length > 0 && (
                   <>
                     {activeTab === 'all' && (
-                      <div className={`px-4 py-1.5 border-b text-[9px] uppercase flex items-center justify-between ${
-                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                      <div className={`px-4 py-2 border-b text-xs uppercase flex items-center justify-between ${
+                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-300 font-sans font-semibold' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan'
                       }`}>
                         <span>GROUPS ({displayGroups.length})</span>
                         <button 
                           onClick={() => setShowCreateGroup(true)}
-                          className={`text-[9px] hover:underline flex items-center gap-0.5 ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
+                          className={`text-xs hover:underline flex items-center gap-1 font-semibold ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
                         >
-                          <Plus size={10} /> NEW
+                          <Plus size={13} /> NEW
                         </button>
                       </div>
                     )}
@@ -2837,41 +2849,41 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                             setActiveBroadcast(null);
                             setActiveGroup(g);
                           }}
-                          className={`group w-full p-3 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
+                          className={`group w-full p-3.5 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
                             isFlow
                               ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
                               : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
                           }`}
                         >
-                          <div className="flex items-center gap-3 truncate">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                          <div className="flex items-center gap-3.5 truncate">
+                            <div className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 ${
                               isFlow 
                                 ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
                                 : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan'
                             }`}>
-                              <Users size={18} />
+                              <Users size={22} />
                             </div>
                             <div className="truncate">
-                              <div className={`font-bold text-sm truncate flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>
+                              <div className={`font-bold text-base md:text-[17px] truncate flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-wider text-white'}`}>
                                 <span>{g.name}</span>
-                                {g.pinned && <Pin size={11} className="text-[#00a884] fill-[#00a884]" />}
+                                {g.pinned && <Pin size={14} className="text-[#00a884] fill-[#00a884]" />}
                               </div>
-                              <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/60 font-mono'}`}>
+                              <div className={`text-xs md:text-sm truncate mt-0.5 ${isFlow ? 'text-[#8696a0]' : 'text-arc-cyan/70 font-mono'}`}>
                                 {g.members?.length || 1} participants • E2EE
                               </div>
                             </div>
                           </div>
-                          <div className="flex items-center gap-1 shrink-0">
+                          <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleTogglePin(g);
                               }}
-                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="p-1.5 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
                               title={g.pinned ? "Unpin group" : "Pin group to top"}
                             >
-                              <Pin size={12} className={g.pinned ? "fill-current text-[#00a884]" : ""} />
+                              <Pin size={15} className={g.pinned ? "fill-current text-[#00a884]" : ""} />
                             </button>
                             <button
                               type="button"
@@ -2879,14 +2891,14 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                                 e.stopPropagation();
                                 handleToggleLockChat(g);
                               }}
-                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="p-1.5 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
                               title="Lock chat into Hidden Vault"
                             >
-                              <Lock size={12} />
+                              <Lock size={15} />
                             </button>
-                            <div className={`text-[8px] px-1.5 py-0.5 rounded uppercase ${
+                            <div className={`text-[10px] md:text-xs px-2 py-0.5 rounded uppercase font-semibold ${
                               isFlow 
-                                ? 'bg-[#00a884]/10 text-[#00a884] border border-[#00a884]/30' 
+                                ? 'bg-[#00a884]/15 text-[#00a884] border border-[#00a884]/30' 
                                 : 'font-mono text-arc-cyan border border-arc-cyan/30'
                             }`}>
                               GROUP
@@ -2902,10 +2914,16 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                 {(activeTab === 'all' || activeTab === 'direct') && (
                   <>
                     {activeTab === 'all' && displayGroups.length > 0 && displayContacts.length > 0 && (
-                      <div className={`px-4 py-1.5 border-b text-[9px] uppercase ${
-                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-400 font-sans font-medium' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan/70'
+                      <div className={`px-4 py-2 border-b text-xs uppercase flex items-center justify-between ${
+                        isFlow ? 'bg-[#182229] border-[#222e35] text-gray-300 font-sans font-semibold' : 'bg-arc-cyan/5 border-arc-cyan/10 font-hud tracking-widest text-arc-cyan'
                       }`}>
-                        DIRECT CHATS ({displayContacts.length})
+                        <span>DIRECT CHATS ({displayContacts.length})</span>
+                        <button 
+                          onClick={() => setShowAddContact(true)}
+                          className={`text-xs hover:underline flex items-center gap-1 font-semibold ${isFlow ? 'text-[#00a884]' : 'text-arc-cyan'}`}
+                        >
+                          <Plus size={13} /> ADD FRIEND
+                        </button>
                       </div>
                     )}
                     {displayContacts.map(c => {
@@ -2919,26 +2937,26 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                             setActiveBroadcast(null);
                             setActiveContact(c);
                           }}
-                          className={`group w-full p-3 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
+                          className={`group w-full p-3.5 text-left border-b transition-all flex items-center justify-between cursor-pointer ${
                             isFlow
                               ? `border-[#222e35] hover:bg-[#202c33] ${isSelected ? 'bg-[#2a3942]' : ''}`
                               : `border-arc-cyan/10 hover:bg-arc-cyan/5 ${isSelected ? 'bg-arc-cyan/15 border-l-2 border-l-arc-cyan shadow-[inset_0_0_15px_rgba(0,240,255,0.15)]' : ''}`
                           }`}
                         >
-                          <div className="flex items-center gap-3 truncate">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 font-bold ${
+                          <div className="flex items-center gap-3.5 truncate">
+                            <div className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 font-bold text-base ${
                               isFlow 
                                 ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
-                                : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan font-mono text-xs'
+                                : 'rounded bg-arc-cyan/10 border border-arc-cyan/40 text-arc-cyan font-mono'
                             }`}>
                               {initials}
                             </div>
                             <div className="truncate">
-                              <div className={`text-sm truncate font-medium flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-widest font-bold text-white'}`}>
+                              <div className={`text-base md:text-[17px] truncate font-bold flex items-center gap-1.5 ${isFlow ? 'text-white font-sans' : 'font-hud tracking-widest text-white'}`}>
                                 <span>{c.name}</span>
-                                {c.pinned && <Pin size={11} className="text-[#00a884] fill-[#00a884]" />}
+                                {c.pinned && <Pin size={14} className="text-[#00a884] fill-[#00a884]" />}
                               </div>
-                              <div className={`text-[11px] truncate ${isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/50 font-mono mt-0.5'}`}>
+                              <div className={`text-xs md:text-sm truncate mt-0.5 ${isFlow ? 'text-[#8696a0]' : 'text-arc-cyan/60 font-mono'}`}>
                                 {c.id.slice(0, 10)}...
                               </div>
                             </div>
@@ -2950,10 +2968,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                                 e.stopPropagation();
                                 handleTogglePin(c);
                               }}
-                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="p-1.5 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
                               title={c.pinned ? "Unpin chat" : "Pin chat to top"}
                             >
-                              <Pin size={12} className={c.pinned ? "fill-current text-[#00a884]" : ""} />
+                              <Pin size={15} className={c.pinned ? "fill-current text-[#00a884]" : ""} />
                             </button>
                             <button
                               type="button"
@@ -2961,20 +2979,20 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                                 e.stopPropagation();
                                 handleToggleLockChat(c);
                               }}
-                              className="p-1 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="p-1.5 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
                               title="Lock chat into Hidden Vault"
                             >
-                              <Lock size={12} />
+                              <Lock size={15} />
                             </button>
                             {c.verified ? (
                               <div className="flex flex-col items-end">
-                                <ShieldCheck size={15} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
-                                <span className={`text-[8px] mt-0.5 ${isFlow ? 'text-[#00a884]' : 'font-mono text-arc-cyan'}`}>VERIFIED</span>
+                                <ShieldCheck size={18} className={isFlow ? 'text-[#00a884]' : 'text-arc-cyan'} />
+                                <span className={`text-[10px] mt-0.5 font-bold ${isFlow ? 'text-[#00a884]' : 'font-mono text-arc-cyan'}`}>VERIFIED</span>
                               </div>
                             ) : (
                               <div className="flex flex-col items-end">
-                                <ShieldAlert size={14} className="text-stark-gold" />
-                                <span className="text-[8px] font-mono text-stark-gold mt-0.5 animate-pulse">UNVERIFIED</span>
+                                <ShieldAlert size={17} className="text-stark-gold" />
+                                <span className="text-[10px] font-mono text-stark-gold mt-0.5 animate-pulse font-bold">UNVERIFIED</span>
                               </div>
                             )}
                           </div>
@@ -3029,64 +3047,64 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
               </div>
             ) : activeGroup ? (
               <>
-                <div className="flex items-center gap-2.5 md:gap-3">
-                  <button onClick={() => setActiveGroup(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => setActiveGroup(null)} className="md:hidden p-2 text-gray-300 hover:text-white rounded transition-colors">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                   </button>
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 ${
                     isFlow 
                       ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/40 font-bold' 
                       : 'rounded bg-arc-cyan/15 border border-arc-cyan/40 text-arc-cyan'
                   }`}>
-                    <Users size={18} />
+                    <Users size={22} />
                   </div>
                   <div>
-                    <div className={`font-bold text-base md:text-lg flex items-center gap-2 flex-wrap ${
+                    <div className={`font-bold text-lg md:text-xl flex items-center gap-2 flex-wrap ${
                       isFlow ? 'text-white font-sans' : 'font-hud tracking-widest text-white'
                     }`}>
                       <span>{activeGroup.name}</span>
-                      <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-semibold flex items-center gap-1 ${
+                      <span className={`text-[10px] md:text-xs px-2 py-0.5 rounded uppercase font-semibold flex items-center gap-1 ${
                         isFlow ? 'bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/30' : 'font-mono text-arc-cyan border border-arc-cyan/30'
                       }`}>
-                        <Lock size={10} /> MLS TREEKEM
+                        <Lock size={12} /> MLS TREEKEM
                       </span>
-                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                      <span className={`text-[10px] md:text-xs px-2 py-0.5 rounded font-mono ${
                         isFlow ? 'bg-[#202c33] text-[#8696a0] border border-white/10' : 'text-arc-cyan/80 bg-arc-cyan/10 border border-arc-cyan/20'
                       }`}>
                         EPOCH #{groupTreesEpoch[activeGroup.id] || 1} • ML-KEM-768
                       </span>
                     </div>
-                    <div className={`text-[11px] mt-0.5 ${
-                      isFlow ? 'text-[#8696a0]' : 'text-[10px] text-arc-cyan/70 font-mono'
+                    <div className={`text-xs md:text-sm mt-0.5 ${
+                      isFlow ? 'text-[#8696a0]' : 'text-xs text-arc-cyan/70 font-mono'
                     }`}>
                       {activeGroup.members?.length || 1} PARTICIPANTS • O(log N) RE-KEYING • ZERO-KNOWLEDGE
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => handleStartGroupCall('audio')}
-                    className="p-2 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
                     title="Start Encrypted Group Voice Mesh"
                   >
-                    <Phone size={17} />
+                    <Phone size={20} />
                   </button>
                   <button
                     type="button"
                     onClick={() => handleStartGroupCall('video')}
-                    className="p-2 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
                     title="Start Encrypted Group Video Mesh"
                   >
-                    <Video size={17} />
+                    <Video size={20} />
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowSearch(!showSearch)}
-                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
                     title="Search in conversation"
                   >
-                    <Search size={17} />
+                    <Search size={20} />
                   </button>
                   <button
                     onClick={() => {
@@ -3103,37 +3121,37 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                         prompt("Group Invite Link:", inviteUrl);
                       });
                     }}
-                    className={`px-2.5 py-1 md:px-3 md:py-1.5 border text-[10px] md:text-xs flex items-center gap-1.5 transition-all ${
+                    className={`px-3 py-1.5 md:px-3.5 md:py-2 border text-xs md:text-sm font-semibold flex items-center gap-1.5 transition-all ${
                       isFlow 
                         ? 'border-[#00a884]/40 bg-[#00a884]/10 text-[#00a884] hover:bg-[#00a884]/20 rounded-md font-sans' 
                         : 'border-arc-cyan/40 bg-arc-cyan/10 text-arc-cyan hover:bg-arc-cyan/20 font-hud tracking-wider shadow-glow-cyan'
                     }`}
                     title="Copy Shareable Invite Link"
                   >
-                    <Share2 size={13} />
+                    <Share2 size={15} />
                     <span className="hidden md:inline">INVITE</span>
                   </button>
                   <button
                     onClick={() => setShowGroupInfo(true)}
-                    className={`px-2.5 py-1 md:px-3 md:py-1.5 border text-[10px] md:text-xs flex items-center gap-1.5 transition-all ${
+                    className={`px-3 py-1.5 md:px-3.5 md:py-2 border text-xs md:text-sm font-semibold flex items-center gap-1.5 transition-all ${
                       isFlow 
                         ? 'border-gray-600 bg-transparent text-gray-300 hover:text-white rounded-md font-sans' 
                         : 'border-arc-cyan/40 bg-stark-bg text-arc-cyan hover:border-arc-cyan font-hud tracking-wider'
                     }`}
                     title="View Group Info & Members"
                   >
-                    <Info size={13} />
+                    <Info size={15} />
                     <span className="hidden md:inline">MEMBERS</span>
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <div className="flex items-center gap-2.5 md:gap-3">
-                  <button onClick={() => setActiveContact(null)} className="md:hidden p-1.5 text-gray-300 hover:text-white rounded transition-colors">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => setActiveContact(null)} className="md:hidden p-2 text-gray-300 hover:text-white rounded transition-colors">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                   </button>
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-base shrink-0 ${
                     isFlow 
                       ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white shadow-sm' 
                       : 'rounded bg-arc-cyan/15 border border-arc-cyan/40 text-arc-cyan font-mono'
@@ -3141,11 +3159,11 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     {(activeContact.name || 'AG').slice(0, 2).toUpperCase()}
                   </div>
                   <div>
-                    <div className={`font-bold text-base md:text-lg text-white ${
+                    <div className={`font-bold text-lg md:text-xl text-white ${
                       isFlow ? 'font-sans' : 'font-hud tracking-widest'
                     }`}>{activeContact.name}</div>
-                    <div className={`text-[11px] ${
-                      isFlow ? 'text-[#00a884]' : 'text-[10px] text-arc-cyan/70 font-mono'
+                    <div className={`text-xs md:text-sm ${
+                      isFlow ? 'text-[#00a884]' : 'text-xs text-arc-cyan/70 font-mono'
                     }`}>
                       {typingUsers[activeContact.id] 
                         ? 'typing...' 
@@ -3153,35 +3171,35 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 md:gap-2">
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => handleStartCall('audio')}
-                    className="p-2 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-300 hover:text-[#00a884] hover:bg-white/10 rounded-full transition-colors"
                     title="Encrypted Voice Call"
                   >
-                    <Phone size={17} />
+                    <Phone size={20} />
                   </button>
                   <button
                     type="button"
                     onClick={() => handleStartCall('video')}
-                    className="p-2 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-300 hover:text-arc-cyan hover:bg-white/10 rounded-full transition-colors"
                     title="Encrypted Video Call"
                   >
-                    <Video size={17} />
+                    <Video size={20} />
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowSearch(!showSearch)}
-                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
                     title="Search in conversation"
                   >
-                    <Search size={17} />
+                    <Search size={20} />
                   </button>
                   <div className="relative">
                     <button 
                       onClick={() => setShowVanishMenu(!showVanishMenu)}
-                      className={`px-2 py-1 md:px-3 md:py-1.5 border text-[9px] md:text-[10px] transition-all rounded ${
+                      className={`px-3 py-1.5 md:px-3.5 md:py-2 border text-xs font-semibold transition-all rounded ${
                         (vanishModes[activeContact.id] || 0) > 0 
                           ? 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold font-bold' 
                           : (isFlow ? 'bg-[#111b21] border-[#2a3942] text-gray-300 hover:border-gray-400 font-sans' : 'bg-stark-bg border-arc-cyan/30 text-arc-cyan/70 hover:border-arc-cyan font-mono tracking-widest')
@@ -3192,7 +3210,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                        (vanishModes[activeContact.id] === 60000) ? 'VANISH: 1m' : 'VANISH: 1h'}
                     </button>
                     {showVanishMenu && (
-                      <div className={`absolute top-full right-0 mt-1 w-32 border z-50 flex flex-col shadow-xl rounded ${
+                      <div className={`absolute top-full right-0 mt-1 w-36 border z-50 flex flex-col shadow-xl rounded ${
                         isFlow ? 'bg-[#202c33] border-[#2a3942]' : 'bg-stark-bg border-arc-cyan shadow-glow-cyan'
                       }`}>
                         {[
@@ -3211,7 +3229,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                               }
                               setShowVanishMenu(false);
                             }}
-                            className={`text-left px-3 py-2 text-[10px] tracking-wider transition-colors ${
+                            className={`text-left px-3 py-2 text-xs tracking-wider transition-colors ${
                               (vanishModes[activeContact.id] || 0) === opt.value 
                                 ? (isFlow ? 'bg-[#00a884] text-white font-bold' : 'bg-arc-cyan text-stark-bg font-bold font-mono')
                                 : (isFlow ? 'text-gray-300 hover:bg-[#2a3942]' : 'text-arc-cyan hover:bg-arc-cyan/20 font-mono')
@@ -3225,13 +3243,13 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   </div>
                   <button 
                     onClick={() => setShowSafetyNumber(true)} 
-                    className={`px-2 py-1 md:px-3 md:py-1.5 rounded border transition-all text-[10px] md:text-xs flex items-center gap-1 md:gap-1.5 ${
+                    className={`px-3 py-1.5 md:px-3.5 md:py-2 rounded border transition-all text-xs font-semibold flex items-center gap-1.5 ${
                       activeContact.verified 
                         ? (isFlow ? 'bg-[#00a884]/15 border-[#00a884] text-[#00a884]' : 'bg-arc-cyan/10 border-arc-cyan text-arc-cyan shadow-glow-cyan font-hud tracking-[0.1em]') 
                         : 'bg-stark-gold/10 border-stark-gold text-stark-gold shadow-glow-gold hover:bg-stark-gold/20'
                     }`}
                   >
-                    {activeContact.verified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
+                    {activeContact.verified ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
                     <span className="hidden md:inline">{activeContact.verified ? 'VERIFIED' : 'AUTHENTICATE'}</span>
                   </button>
                 </div>
@@ -3340,10 +3358,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       e.stopPropagation();
                       setActiveReactionSeq(activeReactionSeq === m.seq ? null : m.seq);
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? 'left-2' : 'right-2'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${activeReactionSeq === m.seq ? '!opacity-100' : ''}`}
+                    className={`absolute -top-3.5 ${m.fromMe ? 'left-2' : 'right-2'} p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${activeReactionSeq === m.seq ? '!opacity-100' : ''}`}
                     title="Add reaction"
                   >
-                    <Smile size={12} />
+                    <Smile size={14} />
                   </button>
 
                   {/* Reply Trigger Button */}
@@ -3353,10 +3371,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       e.stopPropagation();
                       startReply(m);
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? 'left-8' : 'right-8'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    className={`absolute -top-3.5 ${m.fromMe ? 'left-9' : 'right-9'} p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-arc-cyan hover:border-arc-cyan transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
                     title="Reply to message"
                   >
-                    <CornerUpLeft size={12} />
+                    <CornerUpLeft size={14} />
                   </button>
 
                   {/* Star Trigger Button */}
@@ -3366,10 +3384,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       e.stopPropagation();
                       handleToggleStar(m.seq);
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? 'left-14' : 'right-14'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-amber-400 hover:border-amber-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${m.starred ? '!opacity-100 !text-amber-400' : ''}`}
+                    className={`absolute -top-3.5 ${m.fromMe ? 'left-16' : 'right-16'} p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-amber-400 hover:border-amber-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100 ${m.starred ? '!opacity-100 !text-amber-400' : ''}`}
                     title={m.starred ? "Unstar message" : "Star message"}
                   >
-                    <Star size={12} className={m.starred ? "fill-amber-400 text-amber-400" : ""} />
+                    <Star size={14} className={m.starred ? "fill-amber-400 text-amber-400" : ""} />
                   </button>
 
                   {/* Forward Trigger Button */}
@@ -3379,10 +3397,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       e.stopPropagation();
                       setMessageToForward(m);
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? 'left-20' : 'right-20'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    className={`absolute -top-3.5 ${m.fromMe ? 'left-23' : 'right-23'} p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
                     title="Forward message"
                   >
-                    <Share2 size={12} />
+                    <Share2 size={14} />
                   </button>
 
                   {/* Edit Trigger Button (Own sent messages, within 15m) */}
@@ -3395,10 +3413,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                         setInputText(m.text || '');
                         inputRef.current?.focus();
                       }}
-                      className="absolute -top-3 left-26 p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100"
+                      className="absolute -top-3.5 left-30 p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-white transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100"
                       title="Edit message (15m window)"
                     >
-                      <Edit3 size={12} />
+                      <Edit3 size={14} />
                     </button>
                   )}
 
@@ -3420,10 +3438,10 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                         }
                       }
                     }}
-                    className={`absolute -top-3 ${m.fromMe ? (Date.now() - m.ts < 900000 ? 'left-32' : 'left-26') : 'right-26'} p-1 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-red-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
+                    className={`absolute -top-3.5 ${m.fromMe ? (Date.now() - m.ts < 900000 ? 'left-37' : 'left-30') : 'right-30'} p-1.5 rounded-full bg-stark-surface/90 border border-arc-cyan/30 text-arc-cyan/70 hover:text-red-400 transition-all shadow-sm opacity-60 md:opacity-0 group-hover:opacity-100`}
                     title="Delete message"
                   >
-                    <Trash2 size={12} />
+                    <Trash2 size={14} />
                   </button>
 
                   {/* Group Sender Attribution with 1-click [+ ADD FRIEND] button */}
@@ -3725,7 +3743,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
 
                       {/* Message Text with @ Mentions */}
                       {m.text && (
-                        <div className={`font-sans leading-relaxed text-sm ${m.fromMe ? 'text-white' : (isFlow ? 'text-gray-100' : 'text-gray-200')} break-words`}>
+                        <div className={`font-sans leading-relaxed text-[15px] md:text-base ${m.fromMe ? 'text-white' : (isFlow ? 'text-gray-100' : 'text-gray-200')} break-words`}>
                           {m.text.split(/(@\w+)/g).map((part, pIdx) => {
                             if (part.startsWith('@')) {
                               return (
@@ -3755,7 +3773,7 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                             e.stopPropagation();
                             handleToggleReaction(m.seq, emoji);
                           }}
-                          className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-mono transition-all border ${
+                          className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs md:text-sm font-mono transition-all border ${
                             hasMine 
                               ? 'bg-arc-cyan/20 border-arc-cyan text-arc-cyan shadow-[0_0_8px_rgba(0,240,255,0.25)]' 
                               : 'bg-stark-surface/80 border-slate-700 text-gray-300 hover:border-slate-500'
@@ -3763,46 +3781,46 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                           title={`${users.length} reaction${users.length > 1 ? 's' : ''}`}
                         >
                           <span>{emoji}</span>
-                          <span className="text-[10px] font-bold">{users.length}</span>
+                          <span className="text-xs font-bold">{users.length}</span>
                         </button>
                       );
                     })}
                   </div>
                 )}
 
-                <div className={`text-[9px] md:text-[10px] mt-1.5 flex justify-end items-center gap-1.5 ${
-                  isFlow ? 'text-gray-400 font-sans' : 'font-mono text-arc-cyan/50'
+                <div className={`text-xs mt-1.5 flex justify-end items-center gap-1.5 ${
+                  isFlow ? 'text-gray-400 font-sans' : 'font-mono text-arc-cyan/60'
                 }`}>
                   {m.ttl > 0 && m.status === 'read' && m.readAt && (
                     <span className="text-stark-gold font-bold flex items-center gap-1">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                       {Math.max(0, Math.ceil((m.ttl - (Date.now() - m.readAt)) / 1000))}s
                     </span>
                   )}
                   {m.edited && (
-                    <span className="text-[9px] italic text-gray-400 mr-0.5">edited</span>
+                    <span className="text-[10px] italic text-gray-400 mr-0.5">edited</span>
                   )}
                   {m.starred && (
-                    <Star size={10} className="text-yellow-400 fill-yellow-400 mr-0.5 inline shrink-0" />
+                    <Star size={12} className="text-yellow-400 fill-yellow-400 mr-0.5 inline shrink-0" />
                   )}
                   <span className="opacity-70">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                   {m.fromMe && (
                     <div className="flex items-center gap-1 font-hud tracking-widest">
                       {isFlow ? (
                         m.status === 'read' ? (
-                          <CheckCheck size={15} className="text-[#53bdeb]" title="Read" />
+                          <CheckCheck size={17} className="text-[#53bdeb]" title="Read" />
                         ) : m.status === 'delivered' ? (
-                          <CheckCheck size={15} className="text-[#8696a0]" title="Delivered" />
+                          <CheckCheck size={17} className="text-[#8696a0]" title="Delivered" />
                         ) : (
-                          <Check size={15} className="text-[#8696a0]" title="Sent" />
+                          <Check size={17} className="text-[#8696a0]" title="Sent" />
                         )
                       ) : (
                         m.status === 'read' ? (
-                           <><CheckCheck size={12} className="text-[#3b82f6]" /> <span className="text-[#3b82f6]">READ</span></>
+                           <><CheckCheck size={14} className="text-[#3b82f6]" /> <span className="text-[#3b82f6]">READ</span></>
                         ) : m.status === 'delivered' ? (
-                           <><CheckCheck size={12} className="text-arc-cyan" /> <span className="text-arc-cyan">ROUTED</span></>
+                           <><CheckCheck size={14} className="text-arc-cyan" /> <span className="text-arc-cyan">ROUTED</span></>
                         ) : (
-                           <><Check size={12} className="text-arc-cyan/50" /> <span className="text-arc-cyan/50">QUEUED</span></>
+                           <><Check size={14} className="text-arc-cyan/50" /> <span className="text-arc-cyan/50">QUEUED</span></>
                         )
                       )}
                     </div>
@@ -3840,20 +3858,20 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
               accept="image/*,video/*,audio/*,application/pdf,text/*"
             />
             {isRecordingAudio ? (
-              <div className={`flex items-center justify-between p-2 rounded-full transition-all ${
+              <div className={`flex items-center justify-between p-2.5 rounded-full transition-all ${
                 isFlow ? 'bg-[#111b21] border border-[#00a884]/40' : 'bg-stark-surface border border-stark-crimson shadow-[0_0_15px_rgba(255,42,95,0.3)]'
               }`}>
                 <div className="flex items-center gap-3 pl-3">
-                  <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
-                  <span className="font-mono text-xs font-bold text-red-400">
+                  <div className="w-3.5 h-3.5 rounded-full bg-red-500 animate-ping" />
+                  <span className="font-mono text-sm font-bold text-red-400">
                     REC {Math.floor(audioDuration / 60)}:{(audioDuration % 60 < 10 ? '0' : '') + (audioDuration % 60)}
                   </span>
                   <div className="flex items-center gap-1">
                     {[40, 75, 30, 90, 60, 100, 50, 80, 45, 95].map((h, idx) => (
                       <span
                         key={idx}
-                        className={`w-[2.5px] rounded-full animate-pulse ${isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan'}`}
-                        style={{ height: `${h * 0.22}px`, animationDelay: `${idx * 100}ms` }}
+                        className={`w-[3px] rounded-full animate-pulse ${isFlow ? 'bg-[#00a884]' : 'bg-arc-cyan'}`}
+                        style={{ height: `${h * 0.25}px`, animationDelay: `${idx * 100}ms` }}
                       />
                     ))}
                   </div>
@@ -3862,20 +3880,20 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   <button
                     type="button"
                     onClick={cancelAudioRecording}
-                    className="p-2 text-gray-400 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors"
+                    className="p-2.5 text-gray-400 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors"
                     title="Discard voice memo"
                   >
-                    <Trash2 size={17} />
+                    <Trash2 size={20} />
                   </button>
                   <button
                     type="button"
                     onClick={finishAndSendAudioRecording}
-                    className={`w-9 h-9 rounded-full flex items-center justify-center text-white transition-all shadow-md ${
+                    className={`w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center text-white transition-all shadow-md ${
                       isFlow ? 'bg-[#00a884] hover:bg-[#02906f]' : 'bg-arc-cyan text-black hover:bg-white'
                     }`}
                     title="Send voice memo"
                   >
-                    <Send size={15} fill="currentColor" />
+                    <Send size={18} fill="currentColor" />
                   </button>
                 </div>
               </div>
@@ -4032,58 +4050,58 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                   </div>
                 )}
 
-                <div className="flex items-center gap-1.5 md:gap-2">
+                <div className="flex items-center gap-2 md:gap-2.5">
                   <button 
                     type="button"
                     onClick={() => setShowInputEmojiPicker(!showInputEmojiPicker)}
-                    className={`p-2.5 flex items-center justify-center transition-all ${
+                    className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                       isFlow 
                         ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
                         : `border rounded ${showInputEmojiPicker ? 'bg-arc-cyan/30 text-white border-arc-cyan shadow-glow-cyan' : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border-arc-cyan/30 text-arc-cyan'}`
                     }`}
                     title="Emojis & Stickers"
                   >
-                    <Smile size={18} />
+                    <Smile size={22} />
                   </button>
 
                   <button 
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploadingAttachment}
-                    className={`p-2.5 flex items-center justify-center transition-all ${
+                    className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                       isFlow 
                         ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
                         : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
                     }`}
                     title="Attach Media / Files"
                   >
-                    {uploadingAttachment ? <Loader2 size={18} className="animate-spin text-stark-gold" /> : <Paperclip size={18} />}
+                    {uploadingAttachment ? <Loader2 size={22} className="animate-spin text-stark-gold" /> : <Paperclip size={22} />}
                   </button>
 
                   <button 
                     type="button"
                     onClick={() => setShowCameraSnap(true)}
-                    className={`p-2.5 flex items-center justify-center transition-all ${
+                    className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                       isFlow 
                         ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
                         : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
                     }`}
                     title="Camera Snap (In-App Camera)"
                   >
-                    <Camera size={18} />
+                    <Camera size={22} />
                   </button>
 
                   <button 
                     type="button"
                     onClick={() => setShowCreatePoll(true)}
-                    className={`p-2.5 flex items-center justify-center transition-all ${
+                    className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                       isFlow 
                         ? 'text-gray-400 hover:text-white hover:bg-white/10 rounded-full' 
                         : 'bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan/30 text-arc-cyan rounded hover:shadow-glow-cyan'
                     }`}
                     title="Create Poll"
                   >
-                    <BarChart2 size={18} />
+                    <BarChart2 size={22} />
                   </button>
 
                   <input 
@@ -4125,9 +4143,9 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                         }
                       }
                     }}
-                    className={`flex-1 p-2.5 md:p-3 text-xs outline-none transition-all ${
+                    className={`flex-1 p-3 md:p-3.5 text-sm md:text-base outline-none transition-all ${
                       isFlow 
-                        ? 'bg-[#2a3942] text-white rounded-full px-4 placeholder:text-gray-400 border border-transparent focus:border-[#00a884]' 
+                        ? 'bg-[#2a3942] text-white rounded-full px-4 md:px-5 placeholder:text-gray-400 border border-transparent focus:border-[#00a884]' 
                         : 'bg-stark-surface border border-arc-cyan/30 font-mono text-arc-cyan placeholder:text-arc-cyan/30 focus:border-arc-cyan focus:ring-1 focus:ring-arc-cyan/50'
                     }`}
                     placeholder={uploadingAttachment ? "Encrypting attachment..." : (isFlow ? "Type a message" : (activeGroup ? `> Transmit to "${activeGroup.name}"...` : "> Enter transmission..."))}
@@ -4141,12 +4159,12 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       disabled={uploadingAttachment} 
                       className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                         isFlow 
-                          ? 'w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
-                          : 'w-12 md:w-14 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
+                          ? 'w-11 h-11 md:w-12 md:h-12 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
+                          : 'w-12 h-11 md:w-14 md:h-12 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
                       }`}
                       title="Send encrypted message"
                     >
-                      {uploadingAttachment ? <Loader2 size={16} className="animate-spin text-stark-gold" /> : <Send size={16} fill={isFlow ? "currentColor" : "none"} />}
+                      {uploadingAttachment ? <Loader2 size={20} className="animate-spin text-stark-gold" /> : <Send size={20} fill={isFlow ? "currentColor" : "none"} />}
                     </button>
                   ) : (
                     <button 
@@ -4154,12 +4172,12 @@ export default function ChatLayout({ keys, myId, onLock, onPanicWipe }) {
                       onClick={startAudioRecording}
                       className={`p-2.5 md:p-3 flex items-center justify-center transition-all ${
                         isFlow 
-                          ? 'w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
-                          : 'w-12 md:w-14 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
+                          ? 'w-11 h-11 md:w-12 md:h-12 rounded-full bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
+                          : 'w-12 h-11 md:w-14 md:h-12 bg-arc-cyan/10 hover:bg-arc-cyan/20 border border-arc-cyan text-arc-cyan hover:shadow-glow-cyan'
                       }`}
                       title="Hold / Tap to Record Encrypted Voice Memo"
                     >
-                      <Mic size={18} />
+                      <Mic size={22} />
                     </button>
                   )}
                 </div>

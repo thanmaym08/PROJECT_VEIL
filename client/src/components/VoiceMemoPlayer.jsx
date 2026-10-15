@@ -83,7 +83,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
   const isFlow = appMode === 'flow';
 
   return (
-    <div className={`flex items-center gap-2.5 p-2.5 rounded-xl max-w-xs transition-all ${
+    <div className={`flex items-center gap-3 p-3 rounded-2xl max-w-sm transition-all ${
       isFlow 
         ? 'bg-[#182229]/90 border border-emerald-500/20 text-white' 
         : 'bg-stark-surface/90 border border-arc-cyan/40 text-arc-cyan shadow-glow-cyan'
@@ -94,21 +94,21 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
       <button
         type="button"
         onClick={togglePlay}
-        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 ${
+        className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 ${
           isFlow 
             ? 'bg-[#00a884] hover:bg-[#02906f] text-white shadow-md' 
             : 'bg-arc-cyan/20 hover:bg-arc-cyan/30 text-arc-cyan border border-arc-cyan'
         }`}
         title={isPlaying ? "Pause voice memo" : "Play voice memo"}
       >
-        {isPlaying ? <Pause size={15} fill="currentColor" /> : <Play size={15} className="ml-0.5" fill="currentColor" />}
+        {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} className="ml-0.5" fill="currentColor" />}
       </button>
 
       {/* Waveform and Progress Bar */}
-      <div className="flex-1 flex flex-col justify-center gap-1 min-w-[120px]">
+      <div className="flex-1 flex flex-col justify-center gap-1.5 min-w-[130px]">
         <div 
           onClick={handleSeek} 
-          className="flex items-center gap-[2px] h-6 cursor-pointer py-1 group"
+          className="flex items-center gap-[2.5px] h-7 cursor-pointer py-1 group"
           title="Click to seek"
         >
           {barHeights.map((h, i) => {
@@ -118,7 +118,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
               <span
                 key={i}
                 style={{ height: `${h}%` }}
-                className={`w-[3px] rounded-full transition-colors ${
+                className={`w-[3.5px] rounded-full transition-colors ${
                   isFlow
                     ? (isPlayed ? 'bg-[#00a884]' : 'bg-gray-500/50 group-hover:bg-gray-400')
                     : (isPlayed ? 'bg-arc-cyan shadow-[0_0_6px_rgba(0,240,255,0.6)]' : 'bg-arc-cyan/20 group-hover:bg-arc-cyan/40')
@@ -129,7 +129,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
         </div>
 
         {/* Time Labels */}
-        <div className={`flex justify-between text-[10px] font-mono leading-none ${
+        <div className={`flex justify-between text-xs font-mono leading-none ${
           isFlow ? 'text-gray-400' : 'text-arc-cyan/70'
         }`}>
           <span>{formatTime(currentTime)}</span>
@@ -141,7 +141,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
       <button
         type="button"
         onClick={togglePlaybackSpeed}
-        className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold transition-all shrink-0 ${
+        className={`px-2 py-1 rounded-md text-xs font-mono font-bold transition-all shrink-0 ${
           playbackSpeed > 1
             ? (isFlow ? 'bg-[#00a884] text-white shadow-sm' : 'bg-arc-cyan text-black')
             : (isFlow ? 'bg-[#2a3942] text-gray-300 hover:text-white' : 'bg-arc-cyan/10 text-arc-cyan/70 hover:text-arc-cyan')
@@ -152,7 +152,7 @@ export default function VoiceMemoPlayer({ audioUrl, appMode = 'flow', fileName =
       </button>
 
       <div className="shrink-0 opacity-40">
-        <Volume2 size={13} className={isFlow ? 'text-gray-400' : 'text-arc-cyan'} />
+        <Volume2 size={16} className={isFlow ? 'text-gray-400' : 'text-arc-cyan'} />
       </div>
     </div>
   );

@@ -83,6 +83,12 @@
 - [x] Real-time TreeKEM telemetry badges and epoch rotation monitors across Veil Flow and Veil Bunker UI.
 - [x] 100% cryptographic test verification (Test 6: 8-member group re-keying, $\mathcal{O}(\log N)$ commit, $\mathcal{O}(1)$ AES-256-GCM message encryption, tamper rejection).
 
+### Phase 11: Desktop Integration & High-DPI UI Accessibility
+- [x] **Windows 1-Click Desktop Launcher:** Created `start_veil.bat` and `run_veil.bat` to automatically verify Node.js, launch the background relay daemon on port 8080 if not running, and open the default browser.
+- [x] **Windows Desktop Shortcuts:** Created `.lnk` shortcuts with Windows Security Shield icon on both user desktop and OneDrive desktop folders.
+- [x] **Sidebar Toolbar Restructuring:** Resolved button overflow by introducing a 2-row sidebar header with dedicated, prominent buttons for `+ Friend`, `+ Group`, `Linked Devices`, `Broadcast`, and `Push Wake`.
+- [x] **Comprehensive UI Icon & Typography Enlargement:** Scaled contact avatars (`w-12 h-12`), header action icons (size 20), input bar icons (size 22), message text (`text-[15px] md:text-base`), voice note player controls, and touch target padding across all components.
+
 ---
 
 ## 2. Verification Status
